@@ -1,0 +1,82 @@
+services:
+  development:
+    build: .
+    volumes:
+      - ./reports:/opt/perftest/reports
+    depends_on:
+      service:
+        condition: service_healthy
+    env_file:
+      - 'compose/aws.env'
+    environment:
+      S3_ENDPOINT: 'http://localstack:4566'
+      RESULTS_OUTPUT_S3_PATH: 's3://test-results'
+      ENVIRONMENT: local
+      SERVICE_ENDPOINT: localhost
+      SERVICE_PORT: 3000
+      SERVICE_URL_SCHEME: http
+    networks:
+      - performance-tests
+
+  localstack:
+    image: localstack/localstack:4.3.0
+    ports:
+      - '4566:4566' # LocalStack Gateway
+      - '4510-4559:4510-4559' # external services port range
+    restart: always
+    env_file:
+      - 'compose/aws.env'
+    environment:
+      DEBUG: ${DEBUG:-1}
+      LS_LOG: WARN # Localstack DEBUG Level
+      SERVICES: s3, sqs, sns
+      LOCALSTACK_HOST: 127.0.0.1
+    volumes:
+      - '${TMPDIR:-/tmp}/localstack:/var/lib/localstack'
+      - ./compose/localstack:/etc/localstack/init/ready.d
+    healthcheck:
+      test: [ "CMD", "stat", "/tmp/READY" ]
+      interval: 3s
+      start_period: 5s
+      retries: 3
+    networks:
+      - performance-tests
+
+  redis:
+    image: redis:7.2.3-alpine3.18
+    ports:
+      - '6379:6379'
+    restart: always
+    networks:
+      - performance-tests
+
+  service:
+    # replace service-name with the name of your service being performace tested
+    image: defradigital/service-name:${SERVICE_VERSION:-latest}
+    ports:
+      - '3000:3000'
+    links:
+      - 'localstack:localstack'
+      - 'redis:redis'
+    depends_on:
+      localstack:
+        condition: service_healthy
+    env_file:
+      - 'compose/aws.env'
+    environment:
+      PORT: 3000
+      NODE_ENV: development
+      REDIS_HOST: redis
+      USE_SINGLE_INSTANCE_CACHE: true
+    healthcheck:
+      test: ['CMD', 'curl', 'localhost:3000/health']
+      interval: 5s
+      start_period: 5s
+      retries: 3
+    networks:
+      - performance-tests
+
+networks:
+  performance-tests:
+    driver: bridge
+
