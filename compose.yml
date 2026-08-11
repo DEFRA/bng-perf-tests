@@ -46,9 +46,10 @@ services:
 
   localstack:
     image: localstack/localstack:4.3.0
-    ports:
-      - '4566:4566' # LocalStack Gateway
-      - '4510-4559:4510-4559' # external services port range
+    # No host ports published: the only consumer is the `development` container,
+    # which reaches it over the compose network as `localstack:4566`. Publishing
+    # 4566 would clash with the backend stack's own LocalStack when that is
+    # already running (e.g. under Tilt).
     restart: always
     env_file:
       - 'compose/aws.env'
