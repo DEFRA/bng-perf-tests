@@ -1,20 +1,46 @@
+# Standalone local run of the perf suite from *inside this repo*.
+#
+#   docker compose up --build
+#
+# The suite (home-page smoke test by default) is fired at an ALREADY-RUNNING
+# frontend on the host — normally the one the harness brings up (`npm run dev`
+# in bng-metric-harness, or Tilt). We do NOT stand the app up here: the frontend
+# needs the whole backend stack (Postgres, Redis, Defra ID stub, OIDC discovery)
+# to boot, which lives in bng-metric-backend's compose — duplicating it here
+# would just rot. The home page is public, so a reachable frontend is all the
+# smoke test needs.
+#
+# By default it targets http://host.docker.internal:3000 (the host's frontend).
+# Override the target to hit a deployed CDP environment instead, e.g.
+#   SERVICE_ENDPOINT=bng-metric-frontend.dev.cdp-int.defra.cloud \
+#   SERVICE_PORT=443 SERVICE_URL_SCHEME=https ENVIRONMENT=dev \
+#   docker compose up --build
+#
+# LocalStack stands in for S3 so the entrypoint's results-publish step succeeds
+# (it exits non-zero if RESULTS_OUTPUT_S3_PATH is unset); reports also land in
+# ./reports on the host.
 services:
   development:
     build: .
     volumes:
       - ./reports:/opt/perftest/reports
     depends_on:
-      service:
+      localstack:
         condition: service_healthy
+    # host.docker.internal resolves to the host that runs the frontend. On
+    # Docker Desktop it exists already; on Linux it needs this explicit mapping.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     env_file:
       - 'compose/aws.env'
     environment:
       S3_ENDPOINT: 'http://localstack:4566'
       RESULTS_OUTPUT_S3_PATH: 's3://test-results'
-      ENVIRONMENT: local
-      SERVICE_ENDPOINT: localhost
-      SERVICE_PORT: 3000
-      SERVICE_URL_SCHEME: http
+      TEST_SCENARIO: ${TEST_SCENARIO:-home-page}
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      SERVICE_ENDPOINT: ${SERVICE_ENDPOINT:-host.docker.internal}
+      SERVICE_PORT: ${SERVICE_PORT:-3000}
+      SERVICE_URL_SCHEME: ${SERVICE_URL_SCHEME:-http}
     networks:
       - performance-tests
 
@@ -42,41 +68,6 @@ services:
     networks:
       - performance-tests
 
-  redis:
-    image: redis:7.2.3-alpine3.18
-    ports:
-      - '6379:6379'
-    restart: always
-    networks:
-      - performance-tests
-
-  service:
-    # replace service-name with the name of your service being performace tested
-    image: defradigital/service-name:${SERVICE_VERSION:-latest}
-    ports:
-      - '3000:3000'
-    links:
-      - 'localstack:localstack'
-      - 'redis:redis'
-    depends_on:
-      localstack:
-        condition: service_healthy
-    env_file:
-      - 'compose/aws.env'
-    environment:
-      PORT: 3000
-      NODE_ENV: development
-      REDIS_HOST: redis
-      USE_SINGLE_INSTANCE_CACHE: true
-    healthcheck:
-      test: ['CMD', 'curl', 'localhost:3000/health']
-      interval: 5s
-      start_period: 5s
-      retries: 3
-    networks:
-      - performance-tests
-
 networks:
   performance-tests:
     driver: bridge
-

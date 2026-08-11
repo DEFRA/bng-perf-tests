@@ -15,62 +15,73 @@ A successful build results in a Docker container that is capable of running your
 The performance test suites are designed to be run from the CDP Portal.
 The CDP Platform runs test suites in much the same way it runs any other service, it takes a docker image and runs it as an ECS task, automatically provisioning infrastructure as required.
 
-## Local Testing with Docker Compose
+## Running the suite locally (standalone, from this repo)
 
-You can run the entire performance test stack locally using Docker Compose, including LocalStack, Redis, and the target service. This is useful for development, integration testing, or verifying your test scripts **before committing to `main`**, which will trigger GitHub Actions to build and publish the Docker image.
+You can run the suite straight from this repo with Docker Compose — no need to go
+through the harness. Compose builds the JMeter image and fires the scenario at an
+**already-running frontend on your host**, then publishes the results to a
+LocalStack S3 bucket (and to `./reports` on your host).
 
-### Build the Docker image
+> The usual path is `npm run perf` in **bng-metric-harness**, which orchestrates
+> token minting + DB seeding for the heavier scenarios. This compose flow is the
+> lightweight standalone alternative for the public smoke test.
+
+### 1. Start the app under test
+
+The compose stack does **not** stand the frontend up — the frontend needs the
+whole backend stack (Postgres, Redis, Defra ID stub, OIDC discovery), which lives
+in `bng-metric-backend`'s own compose. Bring the app up the normal way first, e.g.
+from the harness:
 
 ```bash
-docker compose build --no-cache development
+# in bng-metric-harness
+(cd ../bng-metric-backend && docker compose up -d)   # supporting services
+npm run dev                                           # frontend on :3000
 ```
 
-This ensures any changes to `entrypoint.sh` or other scripts are picked up properly.
+The home-page smoke test only needs the frontend reachable — `/` is a public page.
 
----
-
-### Start the full test stack
+### 2. Run the suite
 
 ```bash
+# in bng-perf-tests
 docker compose up --build
 ```
 
 This brings up:
 
-* `development`: the container that runs your performance tests
-* `localstack`: simulates AWS S3, SNS, SQS, etc.
-* `redis`: backing service for cache
-* `service`: the application under test
+* `development`: the container that runs the perf scenario (defaults to `home-page`)
+* `localstack`: stands in for AWS S3 so the results-publish step succeeds
 
-Once all services are healthy, your performance tests will automatically start.
+By default it targets `http://host.docker.internal:3000` (your host's frontend).
+Once LocalStack is healthy the run starts automatically, and the container exits
+when the run finishes.
 
----
+### 3. Point it somewhere else (optional)
 
-### Replace `service-name` in Compose File
+Every target knob is an overridable env var. To hit a deployed CDP environment
+instead of your local frontend:
 
-In the `docker-compose.yml`, make sure to replace:
-
-```yaml
-image: defradigital/service-name:${SERVICE_VERSION:-latest}
+```bash
+SERVICE_ENDPOINT=bng-metric-frontend.dev.cdp-int.defra.cloud \
+SERVICE_PORT=443 SERVICE_URL_SCHEME=https ENVIRONMENT=dev \
+docker compose up --build
 ```
 
-with the actual name of your service’s image.
+To run a different scenario file (`scenarios/<name>.jmx`):
 
-This is the service under test, which must expose a `/health` endpoint and listen on port `3000`.
-
----
+```bash
+TEST_SCENARIO=home-page docker compose up --build
+```
 
 ### Notes
 
-* S3 bucket is expected to be `s3://test-results`, automatically created inside LocalStack.
+* The `test-results` S3 bucket is created automatically inside LocalStack.
 * Logs and reports are written to `./reports` on your host.
-* `entrypoint.sh` should contain the logic to wait for dependencies and kick off the test run.
-* The `depends_on` healthchecks ensure services like `localstack` and `service` are ready before tests start.
-* If you make changes to test scripts or entrypoints, rerun with:
-
-```bash
-docker compose up --build
-```
+* If you change `entrypoint.sh` or a scenario, rerun with `docker compose up --build`
+  so the image is rebuilt.
+* On Docker Desktop `host.docker.internal` resolves to the host natively; on Linux
+  the compose file adds the `host-gateway` mapping so it resolves there too.
 
 ## Local Testing with LocalStack
 
