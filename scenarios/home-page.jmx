@@ -2,7 +2,7 @@
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
   <hashTree>
     <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="bng home page smoke">
-      <stringProp name="TestPlan.comments">Hello-world smoke perf test: does the BNG home page load, and in a reasonable time?
+      <stringProp name="TestPlan.comments">Smoke perf test: does the BNG home page load, and in a reasonable time?
 
 Requests GET / on the frontend (a public page — no auth) a handful of times and
 asserts each response is 200 and returns within maxResponseMs. Nothing to seed,
