@@ -7,6 +7,6 @@ COPY entrypoint.sh .
 COPY user.properties .
 
 ENV S3_ENDPOINT=https://s3.eu-west-2.amazonaws.com
-ENV TEST_SCENARIO=test
+ENV TEST_SCENARIO=home-page
 
 ENTRYPOINT [ "./entrypoint.sh" ]
