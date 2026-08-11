@@ -15,31 +15,19 @@ A successful build results in a Docker container that is capable of running your
 The performance test suites are designed to be run from the CDP Portal.
 The CDP Platform runs test suites in much the same way it runs any other service, it takes a docker image and runs it as an ECS task, automatically provisioning infrastructure as required.
 
-## Running the suite locally (standalone, from this repo)
+## Running the suite locally
 
-You can run the suite straight from this repo with Docker Compose — no need to go
-through the harness. Compose builds the JMeter image and fires the scenario at an
-**already-running frontend on your host**, then publishes the results to a
-LocalStack S3 bucket (and to `./reports` on your host).
-
-> The usual path is `npm run perf` in **bng-metric-harness**, which orchestrates
-> token minting + DB seeding for the heavier scenarios. This compose flow is the
-> lightweight standalone alternative for the public smoke test.
+You can run the suite locally with Docker Compose. Compose builds the JMeter image
+and fires the scenario at an **already-running frontend on your host**, then
+publishes the results to a LocalStack S3 bucket (and to `./reports` on your host).
 
 ### 1. Start the app under test
 
 The compose stack does **not** stand the frontend up — the frontend needs the
 whole backend stack (Postgres, Redis, Defra ID stub, OIDC discovery), which lives
-in `bng-metric-backend`'s own compose. Bring the app up the normal way first, e.g.
-from the harness:
-
-```bash
-# in bng-metric-harness
-(cd ../bng-metric-backend && docker compose up -d)   # supporting services
-npm run dev                                           # frontend on :3000
-```
-
-The home-page smoke test only needs the frontend reachable — `/` is a public page.
+in `bng-metric-backend`'s own compose. Bring the app up first so it is serving on
+port 3000. The home-page smoke test only needs the frontend reachable — `/` is a
+public page.
 
 ### 2. Run the suite
 
