@@ -21,22 +21,26 @@ Both endpoints require a Defra ID bearer token — supplied WITHOUT touching the
 command line (so CDP's `set -x` cannot log it) via ${__env(TOKEN)}, with a
 -Jtoken override for local dry-runs.
 
-setUp thread group seeds `seedProjects` projects, each carrying a baseline of
-`seedParcels` synthetic parcels, via POST /projects/new. Seeded rows are only
-visible to the SAME token/org that created them, so seed and measure with one
-token. Set seedProjects=0 to skip seeding and measure a pre-populated dataset.
+SEEDING IS A LOCAL-ONLY STEP AND IS OFF BY DEFAULT (seedProjects=0). The setUp
+thread group creates real, PERSISTENT rows via POST /projects/new and there is
+NO teardown (the backend has no DELETE endpoint), so every run accumulates more
+data. Never seed a shared/CDP environment: leftover rows pollute the org and
+confound the count sweep (GET /projects returns EVERYTHING visible to the token,
+not just this run's seed). Seed only a local/throwaway stack you can reset.
 
-Because a single token sees ALL its visible projects at once, you sweep the two
-size dimensions by RE-RUNNING with different seed params and comparing the
-recorded bytes/latency — e.g.
-  size sweep:  fix seedProjects, vary seedParcels  (100, 500, 1000, 2000)
-  count sweep: fix seedParcels,  vary seedProjects (1, 10, 50, 100)
-  concurrency: large seeded set, then crank threads/rampSeconds (the self-DoS risk)
+The intended workflow is: seed a local backend ONCE with an explicit
+-JseedProjects=N -JseedParcels=M, then measure with seedProjects=0 (the default)
+against any target. Because a single token sees ALL its visible projects at
+once, sweep the two size dimensions by RE-RUNNING against differently-seeded
+datasets and comparing the recorded bytes/latency — e.g.
+  size sweep:  fix project count, vary seedParcels  (100, 500, 1000, 2000)
+  count sweep: fix seedParcels,   vary project count (1, 10, 50, 100)
+  concurrency: large pre-seeded set, then crank threads/rampSeconds (self-DoS risk)
 
 Runtime properties (all overridable, -J..., or the CDP env var in brackets):
   token          Defra ID id_token bearer            (env TOKEN)          [never commit]
   userId         path segment for the /users route   (env USER_ID)        default perf-user
-  seedProjects   projects to create in setUp; 0=skip (env SEED_PROJECTS)  default 10
+  seedProjects   projects to create in setUp; 0=skip (env SEED_PROJECTS)  default 0 (LOCAL-ONLY when >0)
   seedParcels    baseline parcels per seeded project (env SEED_PARCELS)   default 500
   threads        concurrent virtual users            (env THREAD_COUNT)   default 1
   rampSeconds    ramp-up time                        (env RAMPUP_SECONDS) default 1
@@ -91,7 +95,7 @@ the backend integration tests, not here.</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
-          <stringProp name="LoopController.loops">${__P(seedProjects,${__env(SEED_PROJECTS,10)})}</stringProp>
+          <stringProp name="LoopController.loops">${__P(seedProjects,${__env(SEED_PROJECTS,0)})}</stringProp>
           <boolProp name="LoopController.continue_forever">false</boolProp>
         </elementProp>
       </SetupThreadGroup>
