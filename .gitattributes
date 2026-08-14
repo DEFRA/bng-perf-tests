@@ -1,0 +1,5 @@
+# Baseline GeoPackage perf fixtures are binary blobs (SQLite) that scale with
+# parcel count into the MBs. Track them with git-LFS so clones stay small and
+# diffs stay sane. After cloning, run `git lfs pull` to materialise them; the
+# baseline-overlap-scaling scenario reads them straight off disk.
+scenarios/fixtures/*.gpkg filter=lfs diff=lfs merge=lfs -text

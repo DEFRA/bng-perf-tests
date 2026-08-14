@@ -22,6 +22,12 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v3
+        with:
+          # Materialise the git-LFS perf fixtures (scenarios/fixtures/*.gpkg) so
+          # the Docker build COPYs the real GeoPackages into the image, not their
+          # LFS pointer files. Without this the baseline-overlap-scaling scenario
+          # ships broken on CDP.
+          lfs: true
 
       - name: Build the test suite
         uses: DEFRA/cdp-build-action/build-test@main
