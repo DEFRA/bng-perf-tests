@@ -1,0 +1,14 @@
+{
+  "name": "bng-perf-browser",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-driven (Playwright) CDP perf test for BMD-911 — measures how baseline-validation cost scales with habitat-parcel count, authenticating through the real Defra ID login the way the journey-tests do.",
+  "scripts": {
+    "perf": "playwright test",
+    "perf:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0"
+  }
+}

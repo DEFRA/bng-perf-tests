@@ -22,12 +22,21 @@ Each `scenarios/<name>.jmx` is a self-contained test plan. Pick one with
 runner). Every target/tuning knob is an overridable JMeter property — the
 `.jmx`'s own comment block is the authoritative list.
 
-| Scenario                   | Targets  | Auth | What it proves |
-| -------------------------- | -------- | ---- | -------------- |
-| `home-page`                | frontend | no   | the public home page loads within budget (smoke test) |
-| `baseline-overlap-scaling` | backend + cdp-uploader | yes | BMD-911: baseline validation stops scaling quadratically with parcel count |
+| Scenario                   | Engine | Runs on | What it proves |
+| -------------------------- | ------ | ------- | -------------- |
+| `scenarios/home-page`      | JMeter | local + CDP | the public home page loads within budget (smoke test) |
+| `scenarios/baseline-overlap-scaling` | JMeter | **local only** (stub auth) | BMD-911, as a fast local regression check |
+| [`browser-perf/`](browser-perf/README.md) | Playwright | **CDP** (real Defra ID) | BMD-911, on the real deployed stack |
 
-### `baseline-overlap-scaling` (BMD-911)
+> **BMD-911 has two runners, by necessity.** The signal (validation-cost scaling)
+> is the same, but the deployed backend is behind Defra ID and there is no headless
+> token grant, so the CDP run must **drive the frontend in a real browser** (the
+> journey-tests' pattern) — that's [`browser-perf/`](browser-perf/README.md). The
+> JMeter `scenarios/baseline-overlap-scaling` below can't authenticate against
+> deployed CDP; it stays as the quick **local** check (the harness runner mints a
+> stub token). Both use the same two committed `.gpkg` fixtures.
+
+### `baseline-overlap-scaling` (BMD-911) — local JMeter check
 
 The baseline validation query runs one **un-indexed `O(N²)` self-join** over the
 habitat parcels (`c_overlap_offending` in
@@ -68,42 +77,13 @@ The CI build (`publish.yml`) checks out with `lfs: true` so the real files are
 baked into the Docker image; see the fixtures README for how to (re)generate
 them with the harness `gen-gpkg` tool.
 
-**Running it from the CDP Portal (the sanctioned path).** This scenario is meant
-to run standalone on CDP against the **real deployed** backend + cdp-uploader.
-Because those sit behind Defra ID (real B2C — no stub, and JMeter can't do the
-interactive login), the task is handed a token rather than logging in itself:
-
-1. **Mint a token.** Log into the deployed **frontend** for the target
-   environment as a normal user and copy the Defra ID `id_token` from the
-   authenticated session (browser dev tools → the `Authorization: Bearer …`
-   the frontend sends to the backend, or the session/token store). It is
-   short-lived (~1h), so do this immediately before triggering the run.
-2. **Configure the run** in the CDP Portal:
-
-   | Env var           | Value                                             |
-   | ----------------- | ------------------------------------------------- |
-   | `TEST_SCENARIO`   | `baseline-overlap-scaling`                         |
-   | `SERVICE_ENDPOINT`| `bng-metric-backend.<env>.cdp-int.defra.cloud`     |
-   | `BEARER_TOKEN`    | the `id_token` from step 1 (set as a **secret**)   |
-   | `UPLOAD_S3_BUCKET`| the env's consumer bucket, if not `baseline-files` |
-
-   `entrypoint.sh` derives the cdp-uploader host from `ENVIRONMENT`
-   (override with `UPLOADER_ENDPOINT` / `UPLOADER_PORT` / `UPLOADER_URL_SCHEME`)
-   and points `fixtureDir` at the baked-in fixtures. It **fails fast** if
-   `BEARER_TOKEN` is missing or `SERVICE_ENDPOINT` still looks like the frontend.
-   Load and budgets are tunable via `PERF_THREADS` / `PERF_LOOPS` /
-   `VALIDATE_MAX_MS_LARGE` etc.
-3. **Trigger** the run. On the **first** run also confirm the two things that
-   can only be verified live: that the task can POST the multipart upload
-   directly to cdp-uploader on CDP, and that `UPLOAD_S3_BUCKET` matches the
-   env's consumer bucket. If the `upload-and-scan` sampler errors, that's the
-   signal one of those is wrong (network policy / bucket name).
-
-> Token expiry makes this an **on-demand** run (mint → trigger). If you later
-> need *scheduled* runs, the token must be minted inside the task instead —
-> either against a stub-backed env or via a `client_credentials`/ROPC grant at
-> startup in `entrypoint.sh`. That needs a platform/identity decision and is
-> deliberately not built yet (see the scenario's git history / project notes).
+**On CDP, use [`browser-perf/`](browser-perf/README.md) instead of this scenario.**
+This JMeter plan calls the backend directly, which needs a bearer token; against
+the real deployed stack that token only exists inside an interactive Defra ID
+browser login (no stub, no headless grant — see `browser-perf/README.md` for the
+full reasoning). JMeter can't perform that login, so the CDP BMD-911 signal comes
+from the Playwright test in `browser-perf/`, which drives the frontend UI the way
+the journey-tests do. Keep this scenario for the **local** check below.
 
 **Running it under the harness** (`bng-metric-harness`, against the local compose
 stack): `npm run perf` mints a stub token, targets the backend, and reads the
