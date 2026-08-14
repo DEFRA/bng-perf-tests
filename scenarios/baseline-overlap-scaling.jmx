@@ -1,0 +1,571 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="BMD-911 baseline overlap scaling">
+      <stringProp name="TestPlan.comments">Covers BMD-911 "Index the habitat-parcel overlap self-join so validation stops
+scaling quadratically with parcel count".
+
+The baseline validation query runs one un-indexed O(N&#178;) self-join over the habitat
+parcels (c_overlap_offending in backend/src/validation/geopackage/postgis/index.js:
+areas prc1 JOIN areas prc2 ON prc1.idx &lt; prc2.idx AND ST_Intersects(prc1.geom,
+prc2.geom)). Every other check is roughly linear in N, so at a few thousand parcels
+this one join dominates and the cost of POST /baseline/validate/{uploadId} grows with
+the SQUARE of the parcel count. A unit/integration test cannot see this: the endpoint
+returns the identical result (same errors, same valid flag) before and after the fix —
+only the wall-clock changes, and only at scale. That is exactly what a perf test is for.
+
+This scenario is SELF-CONTAINED: JMeter drives the whole CDP upload pipeline itself
+(initiate -> upload+scan -> poll status -> validate), so it needs no seeded data and
+runs unchanged locally (against the compose stack) and from the CDP Portal (against a
+deployed environment). It stages two committed baseline GeoPackages of different sizes
+(a clean, non-overlapping tiling of the redline into N and 2N edge-sharing parcels —
+the worst case for the un-indexed join, which still walks ~N&#178;/2 candidate pairs even
+though there are zero real overlaps to report) and measures each pipeline step as its
+OWN labelled sampler, so:
+
+  * "upload-and-scan @&lt;size&gt;" measures raw upload throughput (a useful signal in its
+    own right), and
+  * "validate @&lt;size&gt;" isolates the validation cost — the BMD-911 signal — so the
+    multi-second upload/virus-scan time never drowns it.
+
+Reading the result: compare the two "validate @&lt;size&gt;" latencies in the summary. A
+QUADRATIC curve roughly QUADRUPLES from N to 2N (~4x); a LINEAR (post-fix) curve
+roughly DOUBLES (~2x). For the cleanest single-shot ratio, run one request at a time
+(locally: PERF_THREADS=1 PERF_LOOPS=1 npm run perf). Under the default concurrent load
+the per-request ratio is noisier but the mean still separates the two curves.
+
+The per-step DurationAssertions encode the POST-FIX expectation, so the suite FAILS by
+design against an unfixed backend (the large validate blows validateMaxMsLarge) and
+PASSES once the GiST index lands. Assertion failures only WARN under the harness runner
+unless PERF_FAIL_ON_ASSERT is set; on the CDP Portal they mark the run.
+
+REQUIRES the two fixtures to exist on disk (they are committed via git-LFS — run
+`git lfs pull` after cloning). Regenerate them with the harness gen-gpkg tool; see
+scenarios/fixtures/README.md for the exact command.
+
+Runtime properties (all overridable with -J..., wired from env vars in entrypoint.sh):
+  bearerToken          Defra ID id_token (Bearer) accepted by the backend. No default —
+                       must be supplied (the harness runner mints a stub token; on CDP
+                       set BEARER_TOKEN). Reads of this property are what tell the runner
+                       this is an authenticated, backend-targeted scenario.
+  domain/port/protocol/env         backend target (set SERVICE_ENDPOINT to the backend)
+  uploaderDomain/uploaderPort/uploaderProtocol   cdp-uploader target. Defaults to the
+                       local compose uploader (host.docker.internal:7337, http); on CDP
+                       set them to cdp-uploader.&lt;env&gt;.cdp-int.defra.cloud / 443 / https.
+  fixtureDir           directory the .gpkg fixtures live in. Default /scenarios/fixtures
+                       (the harness runner's mount point); the CDP image sets it to the
+                       baked-in path.
+  s3Bucket             destination bucket passed to /upload/initiate. Default baseline-files
+  pollIntervalMs / maxPolls        status-poll cadence and cap. Default 1000 / 30
+  initiateMaxMs / uploadMaxMs / statusMaxMs        per-step time budgets (ms)
+  validateMaxMsSmall / validateMaxMsLarge          validate budgets per size (ms). The
+                       LARGE budget is the fail-by-design gate for BMD-911.
+  threads / rampSeconds / loops    load profile. Default 1 / 1 / 1 (the runner overrides)</stringProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+        <collectionProp name="Arguments.arguments">
+          <elementProp name="bearerToken" elementType="Argument">
+            <stringProp name="Argument.name">bearerToken</stringProp>
+            <stringProp name="Argument.value">${__P(bearerToken,)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="uploaderDomain" elementType="Argument">
+            <stringProp name="Argument.name">uploaderDomain</stringProp>
+            <stringProp name="Argument.value">${__P(uploaderDomain,host.docker.internal)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="uploaderPort" elementType="Argument">
+            <stringProp name="Argument.name">uploaderPort</stringProp>
+            <stringProp name="Argument.value">${__P(uploaderPort,7337)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="uploaderProtocol" elementType="Argument">
+            <stringProp name="Argument.name">uploaderProtocol</stringProp>
+            <stringProp name="Argument.value">${__P(uploaderProtocol,http)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="fixtureDir" elementType="Argument">
+            <stringProp name="Argument.name">fixtureDir</stringProp>
+            <stringProp name="Argument.value">${__P(fixtureDir,/scenarios/fixtures)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="s3Bucket" elementType="Argument">
+            <stringProp name="Argument.name">s3Bucket</stringProp>
+            <stringProp name="Argument.value">${__P(s3Bucket,baseline-files)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="pollIntervalMs" elementType="Argument">
+            <stringProp name="Argument.name">pollIntervalMs</stringProp>
+            <stringProp name="Argument.value">${__P(pollIntervalMs,1000)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="maxPolls" elementType="Argument">
+            <stringProp name="Argument.name">maxPolls</stringProp>
+            <stringProp name="Argument.value">${__P(maxPolls,30)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="initiateMaxMs" elementType="Argument">
+            <stringProp name="Argument.name">initiateMaxMs</stringProp>
+            <stringProp name="Argument.value">${__P(initiateMaxMs,3000)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="uploadMaxMs" elementType="Argument">
+            <stringProp name="Argument.name">uploadMaxMs</stringProp>
+            <stringProp name="Argument.value">${__P(uploadMaxMs,20000)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="statusMaxMs" elementType="Argument">
+            <stringProp name="Argument.name">statusMaxMs</stringProp>
+            <stringProp name="Argument.value">${__P(statusMaxMs,3000)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="validateMaxMsSmall" elementType="Argument">
+            <stringProp name="Argument.name">validateMaxMsSmall</stringProp>
+            <stringProp name="Argument.value">${__P(validateMaxMsSmall,8000)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="validateMaxMsLarge" elementType="Argument">
+            <stringProp name="Argument.name">validateMaxMsLarge</stringProp>
+            <stringProp name="Argument.value">${__P(validateMaxMsLarge,12000)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="fixtureSmall" elementType="Argument">
+            <stringProp name="Argument.name">fixtureSmall</stringProp>
+            <stringProp name="Argument.value">${__P(fixtureSmall,baseline-overlap-1000.gpkg)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+          <elementProp name="fixtureLarge" elementType="Argument">
+            <stringProp name="Argument.name">fixtureLarge</stringProp>
+            <stringProp name="Argument.value">${__P(fixtureLarge,baseline-overlap-2000.gpkg)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
+        </collectionProp>
+      </elementProp>
+    </TestPlan>
+    <hashTree>
+      <ConfigTestElement guiclass="HttpDefaultsGui" testclass="ConfigTestElement" testname="Backend HTTP Request Defaults">
+        <stringProp name="HTTPSampler.domain">${__P(domain, bng-metric-backend.${__P(env)}.cdp-int.defra.cloud)}</stringProp>
+        <stringProp name="HTTPSampler.protocol">${__P(protocol, https)}</stringProp>
+        <stringProp name="HTTPSampler.port">${__P(port, 443)}</stringProp>
+        <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+        <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+        <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+          <collectionProp name="Arguments.arguments"/>
+        </elementProp>
+      </ConfigTestElement>
+      <hashTree/>
+      <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="Auth + Accept headers">
+        <collectionProp name="HeaderManager.headers">
+          <elementProp name="" elementType="Header">
+            <stringProp name="Header.name">Authorization</stringProp>
+            <stringProp name="Header.value">Bearer ${bearerToken}</stringProp>
+          </elementProp>
+          <elementProp name="" elementType="Header">
+            <stringProp name="Header.name">Accept</stringProp>
+            <stringProp name="Header.value">application/json</stringProp>
+          </elementProp>
+        </collectionProp>
+      </HeaderManager>
+      <hashTree/>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Baseline overlap scaling">
+        <stringProp name="ThreadGroup.num_threads">${__P(threads,1)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(rampSeconds,1)}</stringProp>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
+          <stringProp name="LoopController.loops">${__P(loops,1)}</stringProp>
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <!-- =================================================================
+             SIZE N (small) block: initiate -> upload+scan -> poll -> validate
+             ================================================================= -->
+        <GenericController guiclass="LogicControllerGui" testclass="GenericController" testname="overlap @small">
+          <stringProp name="TestPlan.comments">The smaller baseline. Sets the linear reference point for the scaling read.</stringProp>
+        </GenericController>
+        <hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="initiate @small">
+            <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{"redirect":"/","s3Bucket":"${s3Bucket}"}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="JSON Content-Type">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header">
+                  <stringProp name="Header.name">Content-Type</stringProp>
+                  <stringProp name="Header.value">application/json</stringProp>
+                </elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="Extract uploadId + uploadUrl, reset status">
+              <stringProp name="JSONPostProcessor.referenceNames">uploadId;uploadUrl;uploadStatusSmall</stringProp>
+              <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadId;$.uploadUrl;$.__reset__</stringProp>
+              <stringProp name="JSONPostProcessor.match_numbers">1;1;1</stringProp>
+              <stringProp name="JSONPostProcessor.defaultValues">NOT_FOUND;NOT_FOUND;pending</stringProp>
+            </JSONPostProcessor>
+            <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Status 200">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="49586">200</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">8</intProp>
+            </ResponseAssertion>
+            <hashTree/>
+            <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Under initiateMaxMs">
+              <stringProp name="DurationAssertion.duration">${initiateMaxMs}</stringProp>
+            </DurationAssertion>
+            <hashTree/>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="upload-and-scan @small">
+            <stringProp name="HTTPSampler.domain">${uploaderDomain}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${uploaderProtocol}</stringProp>
+            <stringProp name="HTTPSampler.port">${uploaderPort}</stringProp>
+            <stringProp name="HTTPSampler.path">${uploadUrl}</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">true</boolProp>
+            <boolProp name="HTTPSampler.BROWSER_COMPATIBLE_MULTIPART">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+              <collectionProp name="Arguments.arguments"/>
+            </elementProp>
+            <elementProp name="HTTPsampler.Files" elementType="HTTPFileArgs">
+              <collectionProp name="HTTPFileArgs.files">
+                <elementProp name="${fixtureDir}/${fixtureSmall}" elementType="HTTPFileArg">
+                  <stringProp name="File.path">${fixtureDir}/${fixtureSmall}</stringProp>
+                  <stringProp name="File.paramname">file</stringProp>
+                  <stringProp name="File.mimetype">application/octet-stream</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Accepted (2xx/3xx)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="46817617">^(2|3)[0-9][0-9]$</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
+            </ResponseAssertion>
+            <hashTree/>
+            <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Under uploadMaxMs">
+              <stringProp name="DurationAssertion.duration">${uploadMaxMs}</stringProp>
+            </DurationAssertion>
+            <hashTree/>
+          </hashTree>
+          <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="poll until ready @small">
+            <stringProp name="LoopController.loops">${maxPolls}</stringProp>
+            <boolProp name="LoopController.continue_forever">false</boolProp>
+          </LoopController>
+          <hashTree>
+            <IfController guiclass="IfControllerPanel" testclass="IfController" testname="if not ready">
+              <stringProp name="IfController.condition">${__jexl3("${uploadStatusSmall}" != "ready",)}</stringProp>
+              <boolProp name="IfController.evaluateAll">false</boolProp>
+              <boolProp name="IfController.useExpression">true</boolProp>
+            </IfController>
+            <hashTree>
+              <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="status @small">
+                <stringProp name="HTTPSampler.path">/upload/${uploadId}/status</stringProp>
+                <stringProp name="HTTPSampler.method">GET</stringProp>
+                <boolProp name="HTTPSampler.postBodyRaw">false</boolProp>
+                <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+                  <collectionProp name="Arguments.arguments"/>
+                </elementProp>
+              </HTTPSamplerProxy>
+              <hashTree>
+                <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="Extract uploadStatus">
+                  <stringProp name="JSONPostProcessor.referenceNames">uploadStatusSmall</stringProp>
+                  <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                  <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                  <stringProp name="JSONPostProcessor.defaultValues">pending</stringProp>
+                </JSONPostProcessor>
+                <hashTree/>
+                <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Status 200">
+                  <collectionProp name="Asserion.test_strings">
+                    <stringProp name="49586">200</stringProp>
+                  </collectionProp>
+                  <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+                  <boolProp name="Assertion.assume_success">false</boolProp>
+                  <intProp name="Assertion.test_type">8</intProp>
+                </ResponseAssertion>
+                <hashTree/>
+                <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Under statusMaxMs">
+                  <stringProp name="DurationAssertion.duration">${statusMaxMs}</stringProp>
+                </DurationAssertion>
+                <hashTree/>
+                <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                  <stringProp name="ConstantTimer.delay">${pollIntervalMs}</stringProp>
+                </ConstantTimer>
+                <hashTree/>
+              </hashTree>
+            </hashTree>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="validate @small">
+            <stringProp name="HTTPSampler.path">/baseline/validate/${uploadId}</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="JSON Content-Type">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header">
+                  <stringProp name="Header.name">Content-Type</stringProp>
+                  <stringProp name="Header.value">application/json</stringProp>
+                </elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Status 200">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="49586">200</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">8</intProp>
+            </ResponseAssertion>
+            <hashTree/>
+            <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Under validateMaxMsSmall">
+              <stringProp name="DurationAssertion.duration">${validateMaxMsSmall}</stringProp>
+            </DurationAssertion>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+        <!-- =================================================================
+             SIZE 2N (large) block. Same pipeline, larger fixture. The validate
+             budget here (validateMaxMsLarge) is the fail-by-design BMD-911 gate.
+             ================================================================= -->
+        <GenericController guiclass="LogicControllerGui" testclass="GenericController" testname="overlap @large">
+          <stringProp name="TestPlan.comments">Twice the parcels. A quadratic curve makes validate here ~4x the small one; a linear (post-fix) curve makes it ~2x.</stringProp>
+        </GenericController>
+        <hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="initiate @large">
+            <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{"redirect":"/","s3Bucket":"${s3Bucket}"}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="JSON Content-Type">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header">
+                  <stringProp name="Header.name">Content-Type</stringProp>
+                  <stringProp name="Header.value">application/json</stringProp>
+                </elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="Extract uploadId + uploadUrl, reset status">
+              <stringProp name="JSONPostProcessor.referenceNames">uploadId;uploadUrl;uploadStatusLarge</stringProp>
+              <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadId;$.uploadUrl;$.__reset__</stringProp>
+              <stringProp name="JSONPostProcessor.match_numbers">1;1;1</stringProp>
+              <stringProp name="JSONPostProcessor.defaultValues">NOT_FOUND;NOT_FOUND;pending</stringProp>
+            </JSONPostProcessor>
+            <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Status 200">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="49586">200</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">8</intProp>
+            </ResponseAssertion>
+            <hashTree/>
+            <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Under initiateMaxMs">
+              <stringProp name="DurationAssertion.duration">${initiateMaxMs}</stringProp>
+            </DurationAssertion>
+            <hashTree/>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="upload-and-scan @large">
+            <stringProp name="HTTPSampler.domain">${uploaderDomain}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${uploaderProtocol}</stringProp>
+            <stringProp name="HTTPSampler.port">${uploaderPort}</stringProp>
+            <stringProp name="HTTPSampler.path">${uploadUrl}</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">true</boolProp>
+            <boolProp name="HTTPSampler.BROWSER_COMPATIBLE_MULTIPART">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+              <collectionProp name="Arguments.arguments"/>
+            </elementProp>
+            <elementProp name="HTTPsampler.Files" elementType="HTTPFileArgs">
+              <collectionProp name="HTTPFileArgs.files">
+                <elementProp name="${fixtureDir}/${fixtureLarge}" elementType="HTTPFileArg">
+                  <stringProp name="File.path">${fixtureDir}/${fixtureLarge}</stringProp>
+                  <stringProp name="File.paramname">file</stringProp>
+                  <stringProp name="File.mimetype">application/octet-stream</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Accepted (2xx/3xx)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="46817617">^(2|3)[0-9][0-9]$</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
+            </ResponseAssertion>
+            <hashTree/>
+            <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Under uploadMaxMs">
+              <stringProp name="DurationAssertion.duration">${uploadMaxMs}</stringProp>
+            </DurationAssertion>
+            <hashTree/>
+          </hashTree>
+          <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="poll until ready @large">
+            <stringProp name="LoopController.loops">${maxPolls}</stringProp>
+            <boolProp name="LoopController.continue_forever">false</boolProp>
+          </LoopController>
+          <hashTree>
+            <IfController guiclass="IfControllerPanel" testclass="IfController" testname="if not ready">
+              <stringProp name="IfController.condition">${__jexl3("${uploadStatusLarge}" != "ready",)}</stringProp>
+              <boolProp name="IfController.evaluateAll">false</boolProp>
+              <boolProp name="IfController.useExpression">true</boolProp>
+            </IfController>
+            <hashTree>
+              <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="status @large">
+                <stringProp name="HTTPSampler.path">/upload/${uploadId}/status</stringProp>
+                <stringProp name="HTTPSampler.method">GET</stringProp>
+                <boolProp name="HTTPSampler.postBodyRaw">false</boolProp>
+                <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+                  <collectionProp name="Arguments.arguments"/>
+                </elementProp>
+              </HTTPSamplerProxy>
+              <hashTree>
+                <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="Extract uploadStatus">
+                  <stringProp name="JSONPostProcessor.referenceNames">uploadStatusLarge</stringProp>
+                  <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                  <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                  <stringProp name="JSONPostProcessor.defaultValues">pending</stringProp>
+                </JSONPostProcessor>
+                <hashTree/>
+                <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Status 200">
+                  <collectionProp name="Asserion.test_strings">
+                    <stringProp name="49586">200</stringProp>
+                  </collectionProp>
+                  <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+                  <boolProp name="Assertion.assume_success">false</boolProp>
+                  <intProp name="Assertion.test_type">8</intProp>
+                </ResponseAssertion>
+                <hashTree/>
+                <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Under statusMaxMs">
+                  <stringProp name="DurationAssertion.duration">${statusMaxMs}</stringProp>
+                </DurationAssertion>
+                <hashTree/>
+                <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                  <stringProp name="ConstantTimer.delay">${pollIntervalMs}</stringProp>
+                </ConstantTimer>
+                <hashTree/>
+              </hashTree>
+            </hashTree>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="validate @large">
+            <stringProp name="HTTPSampler.path">/baseline/validate/${uploadId}</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="JSON Content-Type">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header">
+                  <stringProp name="Header.name">Content-Type</stringProp>
+                  <stringProp name="Header.value">application/json</stringProp>
+                </elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Status 200">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="49586">200</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">8</intProp>
+            </ResponseAssertion>
+            <hashTree/>
+            <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Under validateMaxMsLarge (BMD-911 gate)">
+              <stringProp name="DurationAssertion.duration">${validateMaxMsLarge}</stringProp>
+            </DurationAssertion>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+        <ResultCollector guiclass="SummaryReport" testclass="ResultCollector" testname="Summary Report">
+          <boolProp name="ResultCollector.error_logging">false</boolProp>
+          <objProp>
+            <name>saveConfig</name>
+            <value class="SampleSaveConfiguration">
+              <time>true</time>
+              <latency>true</latency>
+              <timestamp>true</timestamp>
+              <success>true</success>
+              <label>true</label>
+              <code>true</code>
+              <message>true</message>
+              <threadName>true</threadName>
+              <dataType>true</dataType>
+              <encoding>false</encoding>
+              <assertions>true</assertions>
+              <subresults>true</subresults>
+              <responseData>false</responseData>
+              <samplerData>false</samplerData>
+              <xml>false</xml>
+              <fieldNames>true</fieldNames>
+              <responseHeaders>false</responseHeaders>
+              <requestHeaders>false</requestHeaders>
+              <responseDataOnError>false</responseDataOnError>
+              <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
+              <assertionsResultsToSave>0</assertionsResultsToSave>
+              <bytes>true</bytes>
+              <sentBytes>true</sentBytes>
+              <url>true</url>
+              <threadCounts>true</threadCounts>
+              <idleTime>true</idleTime>
+              <connectTime>true</connectTime>
+            </value>
+          </objProp>
+          <stringProp name="filename">report.csv</stringProp>
+        </ResultCollector>
+        <hashTree/>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>
