@@ -68,12 +68,42 @@ The CI build (`publish.yml`) checks out with `lfs: true` so the real files are
 baked into the Docker image; see the fixtures README for how to (re)generate
 them with the harness `gen-gpkg` tool.
 
-**Running it from the CDP Portal.** Set `TEST_SCENARIO=baseline-overlap-scaling`,
-point `SERVICE_ENDPOINT` at the **backend**, and supply a `BEARER_TOKEN` the
-backend accepts. `entrypoint.sh` derives the cdp-uploader host from
-`ENVIRONMENT` (override with `UPLOADER_ENDPOINT`) and points `fixtureDir` at the
-baked-in fixtures. Load and budgets are tunable via `PERF_THREADS` / `PERF_LOOPS`
-/ `VALIDATE_MAX_MS_LARGE` etc. (see `entrypoint.sh`).
+**Running it from the CDP Portal (the sanctioned path).** This scenario is meant
+to run standalone on CDP against the **real deployed** backend + cdp-uploader.
+Because those sit behind Defra ID (real B2C — no stub, and JMeter can't do the
+interactive login), the task is handed a token rather than logging in itself:
+
+1. **Mint a token.** Log into the deployed **frontend** for the target
+   environment as a normal user and copy the Defra ID `id_token` from the
+   authenticated session (browser dev tools → the `Authorization: Bearer …`
+   the frontend sends to the backend, or the session/token store). It is
+   short-lived (~1h), so do this immediately before triggering the run.
+2. **Configure the run** in the CDP Portal:
+
+   | Env var           | Value                                             |
+   | ----------------- | ------------------------------------------------- |
+   | `TEST_SCENARIO`   | `baseline-overlap-scaling`                         |
+   | `SERVICE_ENDPOINT`| `bng-metric-backend.<env>.cdp-int.defra.cloud`     |
+   | `BEARER_TOKEN`    | the `id_token` from step 1 (set as a **secret**)   |
+   | `UPLOAD_S3_BUCKET`| the env's consumer bucket, if not `baseline-files` |
+
+   `entrypoint.sh` derives the cdp-uploader host from `ENVIRONMENT`
+   (override with `UPLOADER_ENDPOINT` / `UPLOADER_PORT` / `UPLOADER_URL_SCHEME`)
+   and points `fixtureDir` at the baked-in fixtures. It **fails fast** if
+   `BEARER_TOKEN` is missing or `SERVICE_ENDPOINT` still looks like the frontend.
+   Load and budgets are tunable via `PERF_THREADS` / `PERF_LOOPS` /
+   `VALIDATE_MAX_MS_LARGE` etc.
+3. **Trigger** the run. On the **first** run also confirm the two things that
+   can only be verified live: that the task can POST the multipart upload
+   directly to cdp-uploader on CDP, and that `UPLOAD_S3_BUCKET` matches the
+   env's consumer bucket. If the `upload-and-scan` sampler errors, that's the
+   signal one of those is wrong (network policy / bucket name).
+
+> Token expiry makes this an **on-demand** run (mint → trigger). If you later
+> need *scheduled* runs, the token must be minted inside the task instead —
+> either against a stub-backed env or via a `client_credentials`/ROPC grant at
+> startup in `entrypoint.sh`. That needs a platform/identity decision and is
+> deliberately not built yet (see the scenario's git history / project notes).
 
 **Running it under the harness** (`bng-metric-harness`, against the local compose
 stack): `npm run perf` mints a stub token, targets the backend, and reads the

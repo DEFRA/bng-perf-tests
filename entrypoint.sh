@@ -53,6 +53,29 @@ UPLOADER_URL_SCHEME=${UPLOADER_URL_SCHEME:-https}
 # logs. JWTs, hostnames and the numeric tunables contain no whitespace, so
 # leaving ${SCENARIO_PROPS} unquoted to word-split into separate args is safe.
 set +x
+
+# Preflight for authenticated, backend-targeted scenarios: fail fast with a
+# readable reason rather than letting a misconfigured CDP run burn a slot on a
+# wall of 401/404s. Runs under `set +x` so it never inspects the token in the
+# trace. Scoped by scenario name so unauthenticated scenarios (home-page) are
+# untouched.
+case "${TEST_SCENARIO}" in
+  baseline-overlap-scaling)
+    if [ -z "${BEARER_TOKEN}" ]; then
+      echo "ERROR: ${TEST_SCENARIO} needs BEARER_TOKEN — a Defra ID id_token the deployed backend accepts."
+      echo "       Set it as a secret in the CDP run config (see README 'Running on CDP'). An expired"
+      echo "       token surfaces as 401s; mint a fresh one just before triggering the run."
+      exit 1
+    fi
+    case "${SERVICE_ENDPOINT}" in
+      *frontend*)
+        echo "WARNING: SERVICE_ENDPOINT=${SERVICE_ENDPOINT} looks like the frontend, but ${TEST_SCENARIO}"
+        echo "         targets the BACKEND. Set SERVICE_ENDPOINT=bng-metric-backend.<env>.cdp-int.defra.cloud."
+        ;;
+    esac
+    ;;
+esac
+
 SCENARIO_PROPS=""
 add_prop bearerToken "${BEARER_TOKEN}"
 add_prop uploaderDomain "${UPLOADER_ENDPOINT}"
