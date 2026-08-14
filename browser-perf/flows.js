@@ -32,6 +32,66 @@ export async function login(page, username, password) {
   })
 }
 
+// Local stub login: drive the cdp-defra-id-stub registration flow (the journey
+// tests' non-e2e path). The stub's pages are NOT the real Government Gateway
+// ones, so this is only for a localhost/dev-stub target. Registers a BNG
+// completer at an approved enrolment status so the upload journey is reachable.
+const REL_ID = '12345'
+const ORG_ID = '54321'
+const ORG_NAME = 'Perf Test Org'
+// Defra ID enrolment code the frontend requires: 3 = COMPLETE_APPROVED.
+const ROLE_STATUS_APPROVED = '3'
+
+export async function loginViaStub(page, { stubBaseUrl, email }) {
+  // Start the app login; it redirects to the stub's authorize endpoint. Register
+  // against the stub carrying that authorize URL as the post-registration return.
+  await page.goto('/auth/login', { waitUntil: 'domcontentloaded' })
+  const landingUrl = page.url()
+  const authorizeUrl = landingUrl.includes('/register')
+    ? decodeURIComponent(new URL(landingUrl).searchParams.get('redirect_uri'))
+    : landingUrl
+  await page.goto(
+    `${stubBaseUrl}/register?redirect_uri=${encodeURIComponent(authorizeUrl)}`
+  )
+
+  await page.getByLabel('Email address').fill(email)
+  await page.getByLabel('First name').fill('BNG')
+  await page.getByLabel('Last name').fill('Perf')
+  await page.getByLabel('Enrolments').fill('1')
+  await page.getByLabel('Enrolment Requests').fill('1')
+  await page.getByRole('button', { name: 'Continue' }).click()
+
+  await page.waitForURL(/\/relationship(?:\?|$)/)
+  await page.getByLabel('Relationship ID').fill(REL_ID)
+  await page.getByLabel('Organisation ID').fill(ORG_ID)
+  await page.getByLabel('Organisation Name').fill(ORG_NAME)
+  await page.getByRole('button', { name: 'Add relationship' }).click()
+
+  await page.waitForURL(/\/relationship(?:\?|$)/)
+  await page.getByRole('link', { name: 'Add role name & status' }).click()
+  await page.waitForURL(/\/role-name/)
+  await page.getByLabel('Role Name').fill('BNG completer')
+  // The stub dropdown only offers word labels; inject the numeric code the
+  // frontend expects and submit it directly (the stub doesn't validate it).
+  await page.evaluate((status) => {
+    const select = document.querySelector('#roleStatus')
+    const option = document.createElement('option')
+    option.value = status
+    option.text = `Status ${status}`
+    select.add(option)
+    select.value = status
+  }, ROLE_STATUS_APPROVED)
+  await page.getByRole('button', { name: 'Add role' }).click()
+
+  await page.waitForURL(/\/relationship(?:\?|$)/)
+  await page.getByRole('link', { name: 'Finish' }).click()
+  await page.waitForURL(/\/summary/)
+  await page.getByRole('link', { name: 'Login' }).click()
+  await page.waitForURL(/\/manage-projects|\/project-name/, {
+    timeout: LOGIN_TIMEOUT_MS,
+  })
+}
+
 // Create a project and return its id, parsed from the task-list URL
 // (/add-project-details/{id}) the app lands on after "Save and continue".
 export async function createProject(page, name) {

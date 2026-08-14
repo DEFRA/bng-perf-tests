@@ -52,24 +52,46 @@ Configure the CDP run:
 `entrypoint.sh` runs the test and publishes `reports/` to the results bucket, then
 exits with the test's status (so the fail-by-design gate marks the run).
 
+## Two login modes
+
+Same test, two sign-in flows — auto-selected from the target, or forced with
+`PERF_LOGIN_MODE`:
+
+- **`real`** (default for a deployed target) — the Government Gateway login with
+  `DEFRA_ID_USERNAME`/`DEFRA_ID_PASSWORD`. This is what **perf-test** and the other
+  real-B2C CDP envs use.
+- **`stub`** (default for a localhost target) — the `cdp-defra-id-stub` registration
+  flow (reproduced from the journey-tests' local path). No credentials needed.
+
+The env target picks the environment; the two never mix (the stub's pages are not
+the real Defra ID ones).
+
 ## Running locally
 
-Against a local stack (`../bng-metric-backend` compose up + frontend on :3000):
+Against the local stack (backend compose up + frontend on :3000), from the harness
+root the one-liner is:
+
+```sh
+npm run perf:browser -- --local
+```
+
+or directly:
 
 ```sh
 cd browser-perf
-npm install
-npx playwright install --with-deps chromium
-BASE_URL=http://localhost:3000 \
-DEFRA_ID_USERNAME=<stub-or-test-user> DEFRA_ID_PASSWORD=<...> \
-npm run perf
+npm install && npx playwright install --with-deps chromium
+BASE_URL=http://localhost:3000 npm run perf   # stub login auto-selected
 ```
 
-Locally the app uses the cdp-defra-id-stub, whose login pages differ from the real
-Government Gateway ones — the selectors in `flows.js` target the **real** Defra ID
-pages (per the journey-tests). For a stub-backed local smoke, use the journey-test
-registration flow instead, or run the JMeter `baseline-overlap-scaling` scenario
-(`../scenarios`) which mints a stub token via the harness runner.
+## Running against perf-test (or another deployed env)
+
+```sh
+# from the harness root
+npm run perf:browser -- --cdp-env=perf-test
+```
+
+`perf-test` uses **real Defra ID**, so set the `DEFRA_ID_USERNAME`/`DEFRA_ID_PASSWORD`
+secrets (BNG completer, no MFA) and, off-platform, an egress `HTTPS_PROXY`.
 
 ## Caveats (please verify on first run)
 

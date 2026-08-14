@@ -21,11 +21,15 @@ import {
   defraIdUsername,
   defraIdPassword,
   fixtures,
+  loginMode,
   scalingRatioMax,
+  stubBaseUrl,
+  stubUserEmail,
   validateMaxMsLarge
 } from '../env.js'
 import {
   login,
+  loginViaStub,
   createProject,
   uploadBaselineAndTime,
   assertCredentials
@@ -33,12 +37,23 @@ import {
 
 const HTTP_OK = 200
 
+// Real Government Gateway (perf-test/CDP) or the local cdp-defra-id-stub — same
+// test either way; only the sign-in steps differ, mirroring the journey-tests.
+async function authenticate(page) {
+  if (loginMode === 'stub') {
+    console.log('[BMD-911] login: cdp-defra-id-stub (local)')
+    await loginViaStub(page, { stubBaseUrl, email: stubUserEmail })
+    return
+  }
+  console.log('[BMD-911] login: real Defra ID (Government Gateway)')
+  assertCredentials(defraIdUsername, defraIdPassword)
+  await login(page, defraIdUsername, defraIdPassword)
+}
+
 test('baseline validation scales sub-quadratically with parcel count', async ({
   page
 }) => {
-  assertCredentials(defraIdUsername, defraIdPassword)
-
-  await login(page, defraIdUsername, defraIdPassword)
+  await authenticate(page)
 
   // A fresh project each run keeps the perf test independent of existing data.
   // `Date.now()` is fine here (not a workflow script) and keeps the name unique.

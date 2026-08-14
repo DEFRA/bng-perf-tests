@@ -16,12 +16,28 @@ export const baseUrl =
   process.env.BASE_URL ??
   `https://bng-metric-frontend.${environment}.cdp-int.defra.cloud`
 
-// Real Defra ID test-account credentials — the SAME secret names the journey
-// tests use, injected via the CDP Portal secret store. The account must have the
-// BNG completer role and no MFA (Government Gateway login is scripted, not
-// interactive-with-a-second-factor).
+// Which login flow to drive. 'real' = Government Gateway (perf-test and other
+// real-B2C CDP envs); 'stub' = the cdp-defra-id-stub registration flow (local
+// dev, whose login pages differ from real Defra ID). Auto-selected from the
+// target — a localhost frontend implies the stub — unless PERF_LOGIN_MODE forces
+// it. This is the same two-mode split the journey-tests use (RUN_MODE=e2e vs not).
+const isLocalTarget = /localhost|127\.0\.0\.1|\[::1\]/i.test(baseUrl)
+export const loginMode =
+  process.env.PERF_LOGIN_MODE ?? (isLocalTarget ? 'stub' : 'real')
+
+// Real Defra ID test-account credentials (real mode only) — the SAME secret
+// names the journey tests use, injected via the CDP Portal secret store. The
+// account must have the BNG completer role and no MFA (Government Gateway login
+// is scripted, not interactive-with-a-second-factor).
 export const defraIdUsername = process.env.DEFRA_ID_USERNAME
 export const defraIdPassword = process.env.DEFRA_ID_PASSWORD
+
+// Stub mode (local) config: the cdp-defra-id-stub base and a per-run user so
+// re-runs don't collide. Registered with the BNG completer role in flows.js.
+export const stubBaseUrl =
+  process.env.STUB_BASE_URL ?? 'http://localhost:3200/cdp-defra-id-stub'
+export const stubUserEmail =
+  process.env.STUB_USER_EMAIL ?? `bng-perf-${Date.now()}@example.com`
 
 // The external Defra ID (Azure B2C / Government Gateway) pages are reached
 // through the platform egress proxy; internal CDP URLs and localhost go direct.
