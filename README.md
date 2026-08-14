@@ -25,18 +25,19 @@ runner). Every target/tuning knob is an overridable JMeter property — the
 | Scenario                   | Engine | Runs on | What it proves |
 | -------------------------- | ------ | ------- | -------------- |
 | `scenarios/home-page`      | JMeter | local + CDP | the public home page loads within budget (smoke test) |
-| `scenarios/baseline-overlap-scaling` | JMeter | **local only** (stub auth) | BMD-911, as a fast local regression check |
-| [`browser-perf/`](browser-perf/README.md) | Playwright | **CDP** (real Defra ID) | BMD-911, on the real deployed stack |
+| `scenarios/baseline-overlap-scaling` | JMeter | **local + CDP (perf-test)** | BMD-911, via the backend perf-test auth token |
+| [`browser-perf/`](browser-perf/README.md) | Playwright | CDP (real Defra ID) | BMD-911 with **no backend change** (fallback) |
 
-> **BMD-911 has two runners, by necessity.** The signal (validation-cost scaling)
-> is the same, but the deployed backend is behind Defra ID and there is no headless
-> token grant, so the CDP run must **drive the frontend in a real browser** (the
-> journey-tests' pattern) — that's [`browser-perf/`](browser-perf/README.md). The
-> JMeter `scenarios/baseline-overlap-scaling` below can't authenticate against
-> deployed CDP; it stays as the quick **local** check (the harness runner mints a
-> stub token). Both use the same two committed `.gpkg` fixtures.
+> **BMD-911 runs in JMeter, on perf-test.** The deployed backend is behind real
+> Defra ID with no headless token grant, so the JMeter suite authenticates with a
+> **static perf token** the backend accepts only in `local`/`perf-test`
+> (`PERF_TEST_AUTH_TOKEN` — see the backend `auth-jwt` bypass). Pass it as
+> `BEARER_TOKEN`. The Playwright [`browser-perf/`](browser-perf/README.md) runner
+> is kept as a **fallback** that needs no backend change (it drives the real
+> browser login instead) — use it if the bypass token isn't available. Both use
+> the same two committed `.gpkg` fixtures.
 
-### `baseline-overlap-scaling` (BMD-911) — local JMeter check
+### `baseline-overlap-scaling` (BMD-911) — JMeter
 
 The baseline validation query runs one **un-indexed `O(N²)` self-join** over the
 habitat parcels (`c_overlap_offending` in
@@ -77,13 +78,23 @@ The CI build (`publish.yml`) checks out with `lfs: true` so the real files are
 baked into the Docker image; see the fixtures README for how to (re)generate
 them with the harness `gen-gpkg` tool.
 
-**On CDP, use [`browser-perf/`](browser-perf/README.md) instead of this scenario.**
-This JMeter plan calls the backend directly, which needs a bearer token; against
-the real deployed stack that token only exists inside an interactive Defra ID
-browser login (no stub, no headless grant — see `browser-perf/README.md` for the
-full reasoning). JMeter can't perform that login, so the CDP BMD-911 signal comes
-from the Playwright test in `browser-perf/`, which drives the frontend UI the way
-the journey-tests do. Keep this scenario for the **local** check below.
+**Running it on CDP (perf-test).** This plan calls the backend directly, which
+needs a bearer token. The backend accepts a static **perf-test auth token** in the
+`local`/`perf-test` environments only (`PERF_TEST_AUTH_TOKEN`, enforced by the
+`auth-jwt` bypass — never active in prod). In the CDP Portal run, set:
+
+  | Env var           | Value                                              |
+  | ----------------- | -------------------------------------------------- |
+  | `TEST_SCENARIO`   | `baseline-overlap-scaling`                          |
+  | `SERVICE_ENDPOINT`| `bng-metric-backend.perf-test.cdp-int.defra.cloud`  |
+  | `BEARER_TOKEN`    | the `PERF_TEST_AUTH_TOKEN` secret (same value)      |
+  | `UPLOAD_S3_BUCKET`| the env's consumer bucket, if not `baseline-files`  |
+
+`entrypoint.sh` derives the cdp-uploader host from `ENVIRONMENT` and points
+`fixtureDir` at the baked-in fixtures; it fails fast if `BEARER_TOKEN` is missing.
+(No real Defra ID login needed — that's the whole point of the token. If the token
+isn't available, the Playwright [`browser-perf/`](browser-perf/README.md) fallback
+drives the real login instead.)
 
 **Running it under the harness** (`bng-metric-harness`, against the local compose
 stack): `npm run perf` mints a stub token, targets the backend, and reads the
