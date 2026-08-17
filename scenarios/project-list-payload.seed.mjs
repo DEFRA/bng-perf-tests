@@ -7,11 +7,19 @@
 // scenarios/<name>.seed.mjs it finds beside the scenario before running it,
 // so this script must not depend on harness helpers. Runnable standalone too:
 //
-//   node scenarios/project-list-payload.seed.mjs --sub=<token-subject> [--parcels=5000]
+//   node scenarios/project-list-payload.seed.mjs [--sub=<token-subject>] [--parcels=5000]
 //
-// (--sub is the owner's verified token subject; the harness's get-stub-token
-// script prints the perf stub user's as `sub=...` on stderr.)
+// --sub is the project owner — it MUST equal the `sub` the backend authenticates
+// the request as, because the list endpoints only return projects owned by that
+// sub. It defaults to `perf-test-bypass`, the synthetic identity the backend's
+// PERF_TEST_AUTH_TOKEN bypass logs in as (bng-metric-backend BMD-911), so a run
+// driven by that static token needs no --sub at all. Override it only when
+// driving the suite with a real Defra ID token, passing that token's subject.
 import { spawnSync } from "node:child_process";
+
+// The sub the backend's perf-test auth bypass authenticates as — keep in step
+// with PERF_TEST_CREDENTIALS.sub in bng-metric-backend src/plugins/auth-jwt.js.
+const PERF_BYPASS_SUB = "perf-test-bypass";
 
 const PROJECT_ID = "00000000-0000-4000-8000-000000000933";
 const DEFAULT_PARCELS = Number(process.env.PERF_PARCELS ?? "2000");
@@ -73,13 +81,10 @@ function argValue(argv, name) {
 }
 
 const argv = process.argv.slice(2);
-const sub = argValue(argv, "sub");
+const sub = argValue(argv, "sub") ?? PERF_BYPASS_SUB;
 const parcelsArg = argValue(argv, "parcels");
 const parcels = parcelsArg === null ? DEFAULT_PARCELS : Number(parcelsArg);
 
-if (!sub) {
-  fail("--sub=<token-subject> is required — it becomes the seeded project's owner.");
-}
 if (!SAFE_SUB.test(sub)) {
   fail(`Refusing to seed for sub "${sub}" — expected only letters, digits and hyphens.`);
 }

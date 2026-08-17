@@ -27,8 +27,9 @@ has a baseline uploaded (ideally a large, multi-thousand-parcel one) — otherwi
 has_baseline / document-body assertions have nothing to exercise.
 
 Runtime properties (all overridable with -J..., wired from env vars in entrypoint.sh):
-  bearerToken         Defra ID id_token (Bearer) for the seeded user. No default —
-                      must be supplied; obtain it from a stub/real login session.
+  bearerToken         Bearer token for the request. No default — must be supplied.
+                      The backend's PERF_TEST_AUTH_TOKEN (perf-test auth bypass,
+                      authenticates as sub=perf-test-bypass) or a real Defra ID id_token.
   userId              path segment for /users/{userId}/projects (the handler trusts
                       the token sub, not this value). Default: me
   listSizeLimitBytes  max allowed list response size in bytes. Default: 262144 (256 KB)
