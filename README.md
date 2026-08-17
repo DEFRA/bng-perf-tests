@@ -17,14 +17,25 @@ The CDP Platform runs test suites in much the same way it runs any other service
 
 ## Scenarios
 
-Each `.jmx` under `scenarios/` is one suite. `entrypoint.sh` picks the file named by
-`TEST_SCENARIO` (default `home-page`), so select a suite by setting that env var on the
-CDP task (or `docker run`), e.g. `TEST_SCENARIO=project-list-payload`.
+Each `.jmx` under `scenarios/` is one suite. By default `entrypoint.sh` runs **every**
+scenario in `scenarios/` in one task, resolving each suite's target and auth from the
+scenario itself. Set `TEST_SCENARIO` to restrict the run to one suite (or a
+space-separated list), e.g. `TEST_SCENARIO=project-list-payload`.
 
 | Scenario                | Targets               | Covers                                                                 |
 | ----------------------- | --------------------- | ---------------------------------------------------------------------- |
 | `home-page`             | `bng-metric-frontend` | Minimal smoke check against the public home page (`/`).                |
 | `project-list-payload`  | `bng-metric-backend`  | BMD-933 — the project list endpoints ship the whole project document.  |
+
+Per scenario, the entrypoint picks the target and auth automatically: a scenario that
+reads the `bearerToken` property drives the **backend** API and gets a minted stub token;
+any other scenario targets the public **frontend** unauthenticated. The stub token is
+minted at most once per task and shared across the authenticated scenarios. Each
+scenario's JMeter report is published under its own `<results>/<scenario>/` prefix in S3
+so a multi-scenario run keeps every dashboard. A scenario's assertion failures do not
+fail the task (project-list-payload is red by design until the BMD-933 backend fix
+lands); only an infrastructure failure — a missing scenario, a failed token mint, or a
+scenario that produced no report — makes the task exit non-zero.
 
 ### `project-list-payload` (BMD-933)
 
@@ -47,9 +58,10 @@ and passes once the projection + `limit`/`offset` pagination land**:
 - **Duration Assertion** — guards against the multi-second event-loop stall a multi-MB
   synchronous `JSON.stringify` causes under load.
 
-**Point the suite at the backend**, not the frontend — set
-`SERVICE_ENDPOINT=bng-metric-backend.<env>.cdp-int.defra.cloud` (and `SERVICE_PORT` /
-`SERVICE_URL_SCHEME` if not the 443/https default).
+The entrypoint targets `bng-metric-backend.<env>.cdp-int.defra.cloud` for this scenario
+automatically, so no `SERVICE_ENDPOINT` is needed on CDP. Override `SERVICE_ENDPOINT`
+(and `SERVICE_PORT` / `SERVICE_URL_SCHEME`) only for a one-off target such as a local
+backend.
 
 ### Authenticating: a real cdp-defra-id-stub token
 
