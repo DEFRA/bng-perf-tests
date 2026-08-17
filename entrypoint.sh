@@ -20,8 +20,15 @@ SCENARIOFILE=${JM_SCENARIOS}/${TEST_SCENARIO}.jmx
 REPORTFILE=${NOW}-perftest-${TEST_SCENARIO}-report.csv
 LOGFILE=${JM_LOGS}/perftest-${TEST_SCENARIO}.log
 
-# ENVIRONMENT is set to the name of the environment the test is running in.
-SERVICE_ENDPOINT=${SERVICE_ENDPOINT:-bng-metric-frontend.${ENVIRONMENT}.cdp-int.defra.cloud}
+# Target service. ENVIRONMENT is set by CDP to the environment the test runs in;
+# on CDP nothing overrides SERVICE_ENDPOINT, so the default is what the suite hits.
+# project-list-payload drives the backend API; every other scenario targets the frontend.
+if [ "${TEST_SCENARIO}" = "project-list-payload" ]; then
+  DEFAULT_SERVICE=bng-metric-backend
+else
+  DEFAULT_SERVICE=bng-metric-frontend
+fi
+SERVICE_ENDPOINT=${SERVICE_ENDPOINT:-${DEFAULT_SERVICE}.${ENVIRONMENT}.cdp-int.defra.cloud}
 # PORT is used to set the port of this performance test container
 SERVICE_PORT=${SERVICE_PORT:-443}
 SERVICE_URL_SCHEME=${SERVICE_URL_SCHEME:-https}
