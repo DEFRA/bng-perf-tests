@@ -11,15 +11,16 @@
 //
 // --sub is the project owner — it MUST equal the `sub` the backend authenticates
 // the request as, because the list endpoints only return projects owned by that
-// sub. It defaults to `perf-test-bypass`, the synthetic identity the backend's
-// PERF_TEST_AUTH_TOKEN bypass logs in as (bng-metric-backend BMD-911), so a run
-// driven by that static token needs no --sub at all. Override it only when
-// driving the suite with a real Defra ID token, passing that token's subject.
+// sub. It defaults to the sub the cdp-defra-id-stub issues for the perf user that
+// scripts/get-stub-token.mjs registers (bng-perf@bng.example.com), so a standalone
+// local seed lines up with a stub-minted token. The harness/CDP runner overrides
+// --sub with the freshly-minted token's sub; override it yourself only when
+// driving the suite with a different token.
 import { spawnSync } from "node:child_process";
 
-// The sub the backend's perf-test auth bypass authenticates as — keep in step
-// with PERF_TEST_CREDENTIALS.sub in bng-metric-backend src/plugins/auth-jwt.js.
-const PERF_BYPASS_SUB = "perf-test-bypass";
+// Deterministic sub the stub issues for bng-perf@bng.example.com — keep in step
+// with PERF_USER_EMAIL / deterministicUuid in scripts/get-stub-token.mjs.
+const PERF_USER_SUB = "e7ae699f-cfd0-5f66-b770-10248ab5c3c1";
 
 const PROJECT_ID = "00000000-0000-4000-8000-000000000933";
 const DEFAULT_PARCELS = Number(process.env.PERF_PARCELS ?? "2000");
@@ -81,7 +82,7 @@ function argValue(argv, name) {
 }
 
 const argv = process.argv.slice(2);
-const sub = argValue(argv, "sub") ?? PERF_BYPASS_SUB;
+const sub = argValue(argv, "sub") ?? PERF_USER_SUB;
 const parcelsArg = argValue(argv, "parcels");
 const parcels = parcelsArg === null ? DEFAULT_PARCELS : Number(parcelsArg);
 

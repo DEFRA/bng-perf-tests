@@ -26,6 +26,41 @@ SERVICE_ENDPOINT=${SERVICE_ENDPOINT:-bng-metric-frontend.${ENVIRONMENT}.cdp-int.
 SERVICE_PORT=${SERVICE_PORT:-443}
 SERVICE_URL_SCHEME=${SERVICE_URL_SCHEME:-https}
 
+# ── Authentication (cdp-defra-id-stub) ───────────────────────────────────────
+# Scenarios that read the bearerToken property (project-list-payload, BMD-933)
+# call the authenticated backend. Rather than replicate the interactive Defra ID
+# login, mint a REAL token from the cdp-defra-id-stub headlessly (register ->
+# authorize -> token, PKCE) — the same login the app performs. This follows the
+# DEFRA trade-demo-perf-tests pattern and needs no auth-bypass code in the
+# backend: the backend on this environment must simply trust stub tokens (its
+# OIDC_DISCOVERY_URL points at the stub, as it already does on dev).
+#
+# If BEARER_TOKEN is already supplied (e.g. a pre-minted token set on the CDP
+# task) it is used as-is and no minting happens.
+STUB_BASE_URL=${STUB_BASE_URL:-https://cdp-defra-id-stub.${ENVIRONMENT}.cdp-int.defra.cloud/cdp-defra-id-stub}
+
+if grep -q "__P(bearerToken" "${SCENARIOFILE}" 2>/dev/null && [ -z "${BEARER_TOKEN}" ]; then
+  # Mint with xtrace OFF so the token is never echoed into the CDP logs.
+  set +x
+  echo "▸ minting a cdp-defra-id-stub token from ${STUB_BASE_URL}"
+  MINT_ERR=$(mktemp)
+  BEARER_TOKEN=$(STUB_BASE_URL="${STUB_BASE_URL}" node "${JM_HOME}/scripts/get-stub-token.mjs" 2>"${MINT_ERR}")
+  MINT_STATUS=$?
+  cat "${MINT_ERR}" >&2
+  if [ $MINT_STATUS -ne 0 ] || [ -z "${BEARER_TOKEN}" ]; then
+    rm -f "${MINT_ERR}"
+    echo "ERROR: failed to mint a stub token. Is ${STUB_BASE_URL} reachable, and is the backend's OIDC_DISCOVERY_URL pointed at that stub?" >&2
+    exit 1
+  fi
+  # The backend trusts the token sub, not the path segment, but keep USER_ID
+  # consistent with the minted sub when the caller has not set one.
+  if [ -z "${USER_ID}" ]; then
+    USER_ID=$(sed -n 's/^sub=//p' "${MINT_ERR}")
+  fi
+  rm -f "${MINT_ERR}"
+  set -x
+fi
+
 # Optional per-scenario tuning, forwarded from env vars into JMeter properties.
 # Kept out of the committed .jmx so a secret BEARER_TOKEN never lands in git, and
 # so each run can size its own load. Each is forwarded only when set; otherwise

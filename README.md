@@ -51,62 +51,62 @@ and passes once the projection + `limit`/`offset` pagination land**:
 `SERVICE_ENDPOINT=bng-metric-backend.<env>.cdp-int.defra.cloud` (and `SERVICE_PORT` /
 `SERVICE_URL_SCHEME` if not the 443/https default).
 
-### Authenticating: the perf-test bypass token
+### Authenticating: a real cdp-defra-id-stub token
 
 The endpoints require a Defra ID Bearer token. Rather than replicate the interactive
-OIDC login in JMeter, this suite drives them with the backend's **perf-test auth
-bypass** (bng-metric-backend BMD-911): a static `PERF_TEST_AUTH_TOKEN` that the
-backend accepts as a bearer token and authenticates as a synthetic user with
-`sub = perf-test-bypass`. The bypass is only honoured when the backend runs with
-`ENVIRONMENT=local` or `ENVIRONMENT=perf-test`; it is inert everywhere else.
+OIDC login in JMeter — or add an auth-bypass to the backend — this suite **mints a real
+token from the `cdp-defra-id-stub`** headlessly, the same login the app performs. This
+is the DEFRA perf-test pattern (see `DEFRA/trade-demo-perf-tests`): `entrypoint.sh` runs
+`scripts/get-stub-token.mjs` (register → authorize → token, PKCE) before JMeter and
+forwards the token into the `bearerToken` property with xtrace off, so it never lands in
+the committed `.jmx` or the CDP logs.
 
-So to run this suite you must, **on the backend**:
+**The backend must trust stub tokens on the target environment** — i.e. its
+`OIDC_DISCOVERY_URL`/`OIDC_ISSUER` must point at that environment's
+`cdp-defra-id-stub` (already the case on **local** and **dev**; for **perf-test** this is
+a one-line change in `cdp-app-config` `services/bng-metric-backend/perf-test`). No
+backend code, and no `PERF_TEST_AUTH_TOKEN`.
 
-- deploy it with `ENVIRONMENT=local` (local run) or `ENVIRONMENT=perf-test`, and
-- set `PERF_TEST_AUTH_TOKEN` to a strong random secret.
+The stub base URL defaults to `https://cdp-defra-id-stub.<ENVIRONMENT>.cdp-int.defra.cloud/cdp-defra-id-stub`;
+override any of the minting inputs if needed:
 
-Then set **`BEARER_TOKEN` to that same secret** here. The token (and other tuning) is
-forwarded from env vars into JMeter properties by `entrypoint.sh` — so the secret
-never lands in the committed `.jmx` and is never echoed by `set -x`:
+| Env var                 | Default                                                        | Purpose                                             |
+| ----------------------- | -------------------------------------------------------------- | --------------------------------------------------- |
+| `BEARER_TOKEN`          | _(minted)_                                                     | Preset a token to **skip** minting (e.g. a pre-minted token on the CDP task). |
+| `STUB_BASE_URL`         | `…/cdp-defra-id-stub.<ENVIRONMENT>.cdp-int.defra.cloud/…`      | The stub to mint against.                           |
+| `OIDC_CLIENT_ID`        | `63983fc2-cfff-45bb-8ec2-959e21062b9a`                        | Stub OIDC client (the shared CDP stub client).      |
+| `USER_ID`               | minted token `sub`                                             | `/users/{userId}` path segment (token `sub` is trusted, not this). |
+| `LIST_SIZE_LIMIT_BYTES` | `262144`                                                       | Max allowed list response size (256 KB).            |
+| `LIST_MAX_LATENCY_MS`   | `2000`                                                         | Max allowed list response time.                     |
+| `LIST_LIMIT` / `LIST_OFFSET` | `50` / `0`                                                | Pagination params exercised against both endpoints. |
+| `LIST_THREADS` / `LIST_RAMP_SECONDS` / `LIST_LOOPS` | `10` / `10` / `20`                | Load profile.                                       |
 
-| Env var                 | JMeter prop           | Default  | Purpose                                             |
-| ----------------------- | --------------------- | -------- | --------------------------------------------------- |
-| `BEARER_TOKEN`          | `bearerToken`         | _(none)_ | Backend `PERF_TEST_AUTH_TOKEN` (or a real Defra ID `id_token`). Required. |
-| `USER_ID`               | `userId`              | `me`     | `/users/{userId}` path segment (token `sub` is trusted, not this). |
-| `LIST_SIZE_LIMIT_BYTES` | `listSizeLimitBytes`  | `262144` | Max allowed list response size (256 KB).            |
-| `LIST_MAX_LATENCY_MS`   | `listMaxLatencyMs`    | `2000`   | Max allowed list response time.                     |
-| `LIST_LIMIT`            | `limit`               | `50`     | Pagination `limit` exercised against both endpoints.|
-| `LIST_OFFSET`           | `offset`              | `0`      | Pagination `offset`.                                |
-| `LIST_THREADS`          | `threads`             | `10`     | Concurrent virtual users.                           |
-| `LIST_RAMP_SECONDS`     | `rampSeconds`         | `10`     | Ramp-up period.                                     |
-| `LIST_LOOPS`            | `loops`               | `20`     | Iterations per user.                                |
+### Seed the data — owner must match the minted `sub`
 
-> Driving the suite with a **real** Defra ID `id_token` instead of the bypass still
-> works — the backend authenticates it normally. Capture one from a logged-in session
-> (against the `cdp-defra-id-stub` complete the register → relationship → role → login
-> flow and grab the forwarded `Authorization: Bearer` header on any backend call), set
-> it as `BEARER_TOKEN`, and seed the data under that token's `sub` (see below).
-
-### Seed the data — owner must match the authenticated `sub`
-
-The environment must hold at least one project **owned by the `sub` the request
-authenticates as**, with a baseline uploaded — ideally a large, multi-thousand-parcel
-one — or the `has_baseline` and document-body assertions have nothing to exercise (and
-`has_baseline` will fail against the empty list). The list endpoints only return
-projects owned by that `sub`.
+The environment must hold at least one project **owned by the `sub` the stub issues**,
+with a baseline uploaded — ideally a large, multi-thousand-parcel one — or the
+`has_baseline` and document-body assertions have nothing to exercise (and `has_baseline`
+fails against the empty list). The list endpoints only return projects owned by that
+`sub`.
 
 `scenarios/project-list-payload.seed.mjs` upserts that project into the local compose
-Postgres. Its `--sub` defaults to **`perf-test-bypass`** — the bypass identity — so
-with the bypass token no argument is needed:
+Postgres. Its `--sub` defaults to the stub perf-user's deterministic sub
+(`e7ae699f-cfd0-5f66-b770-10248ab5c3c1`, for `bng-perf@bng.example.com`), so a local seed
+lines up with the minted token without an argument:
 
 ```sh
-node scenarios/project-list-payload.seed.mjs           # owner: perf-test-bypass
-node scenarios/project-list-payload.seed.mjs --sub=<real-token-sub>   # real id_token
+node scenarios/project-list-payload.seed.mjs            # owner: the stub perf user
+node scenarios/project-list-payload.seed.mjs --sub=<other-sub>
 ```
 
 The seed script talks to local Docker only. On the CDP **perf-test** environment it
-cannot reach the managed database, so that environment must be seeded with an
-equivalent big-baseline project owned by `perf-test-bypass` by other means.
+cannot reach the managed database, so that environment must be seeded with an equivalent
+big-baseline project owned by the same stub `sub` by other means (e.g. a one-off SQL
+fixture applied through the CDP DB tooling).
+
+> **Local shortcut:** from the harness, `npm run perf` does all of this for you — mints
+> the stub token, seeds the project under its sub, runs JMeter, and prints a per-endpoint
+> pass/fail summary. The steps below are for running the container directly / on CDP.
 
 Run it locally against a backend on `localhost:3001` with:
 
@@ -114,16 +114,17 @@ Run it locally against a backend on `localhost:3001` with:
 docker build . -t bng-perf-tests
 docker run --rm --network host \
   -e TEST_SCENARIO=project-list-payload \
+  -e ENVIRONMENT=local \
   -e SERVICE_ENDPOINT=localhost -e SERVICE_PORT=3001 -e SERVICE_URL_SCHEME=http \
-  -e BEARER_TOKEN="$PERF_TEST_AUTH_TOKEN" \
+  -e STUB_BASE_URL=http://localhost:3200/cdp-defra-id-stub \
   -e RESULTS_OUTPUT_S3_PATH='s3://my-bucket' -e S3_ENDPOINT='http://host.docker.internal:4566' \
   -e AWS_ACCESS_KEY_ID='test' -e AWS_SECRET_ACCESS_KEY='test' -e AWS_REGION='eu-west-2' \
   bng-perf-tests
 ```
 
-(The backend must be running with `ENVIRONMENT=local` and the same
-`PERF_TEST_AUTH_TOKEN` for the bypass to be honoured. `USER_ID` is left at its `me`
-default — the backend trusts the token `sub`, not the path segment.)
+(The backend must be running with its OIDC pointed at that same stub — the default on a
+local `tilt up`. `USER_ID` is left to the minted `sub`; the backend trusts the token
+`sub`, not the path segment. Seed the project first so the assertions have data.)
 
 ## Running the suite locally
 
