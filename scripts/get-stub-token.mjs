@@ -202,11 +202,17 @@ async function exchangeCode(code, verifier) {
   return JSON.parse(text);
 }
 
-function decodeSub(idToken) {
+// Decode the JWT payload (claims are not secret; the signature is what matters).
+// Used only for diagnostics + the sub the entrypoint reads back.
+function decodeClaims(idToken) {
   const payload = idToken.split(".")[1];
   const json = Buffer.from(payload, "base64url").toString("utf8");
-  return JSON.parse(json).sub;
+  return JSON.parse(json);
 }
+
+const MILLIS_PER_SECOND = 1000;
+const isoOrNone = (epochSeconds) =>
+  epochSeconds ? new Date(epochSeconds * MILLIS_PER_SECOND).toISOString() : "(none)";
 
 async function main() {
   const jar = makeJar();
@@ -217,7 +223,12 @@ async function main() {
 
   await registerPerfUser();
 
-  note("▸ stub-token: logging in and exchanging the code");
+  // Log the non-secret authorize inputs before the hop, so a failure here is
+  // immediately attributable — in particular the redirect_uri, whose value is
+  // what a CDP WAF 403s when it looks like a localhost/SSRF target.
+  note(
+    `▸ stub-token: authorize hop → GET ${STUB}/authorize (client_id=${CLIENT_ID}, redirect_uri=${REDIRECT_URI})`,
+  );
   const authorizeUrl = buildAuthorizeUrl(challenge, state, nonce, PERF_USER_EMAIL);
   const code = await followToCode(authorizeUrl, jar, state);
   const tokens = await exchangeCode(code, verifier);
@@ -226,8 +237,15 @@ async function main() {
     fail(`Token response had no id_token: ${JSON.stringify(tokens).slice(0, ERROR_SNIPPET_MAX)}`);
   }
 
-  // sub -> stderr so it doesn't pollute stdout; token -> stdout for piping.
-  process.stderr.write(`sub=${decodeSub(idToken)}\n`);
+  // Surface the claims the backend verifies against (issuer must match the
+  // backend's OIDC_ISSUER; a mismatch is the usual cause of a 401 after a
+  // successful mint). Never log the token itself — only its non-secret claims.
+  const claims = decodeClaims(idToken);
+  note(
+    `▸ stub-token: minted ok — sub=${claims.sub} iss=${claims.iss ?? "(none)"} aud=${claims.aud ?? "(none)"} exp=${isoOrNone(claims.exp)}`,
+  );
+  // sub -> stderr (machine-readable line the entrypoint parses); token -> stdout.
+  process.stderr.write(`sub=${claims.sub}\n`);
   process.stdout.write(idToken);
 }
 

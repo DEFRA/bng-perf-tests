@@ -19,10 +19,30 @@ SERVICE_PORT=${SERVICE_PORT:-443}
 SERVICE_URL_SCHEME=${SERVICE_URL_SCHEME:-https}
 STUB_BASE_URL=${STUB_BASE_URL:-https://cdp-defra-id-stub.${ENVIRONMENT}.cdp-int.defra.cloud/cdp-defra-id-stub}
 
+# Redirect URI presented during the stub OIDC dance. The stub echoes the auth
+# code back to whatever redirect_uri is given (it does not validate it against a
+# registered client), and get-stub-token.mjs reads the code straight off the 302
+# Location without ever calling the URL — so this only has to be a string, not a
+# reachable endpoint. It MUST NOT contain `localhost`, though: on CDP the WAF
+# 403s an /authorize request whose query carries a localhost/SSRF-looking target
+# (that is what failed the perf-test run). Use the deployed frontend's callback
+# on CDP; local (no WAF) keeps the real localhost callback.
+if [ "${ENVIRONMENT}" = "local" ]; then
+  OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-http://localhost:3000/auth/callback}
+else
+  OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-https://bng-metric-frontend.${ENVIRONMENT}.cdp-int.defra.cloud/auth/callback}
+fi
+
 # The suite is a SINGLE JMeter plan with two thread groups — the public home page
 # (frontend) and the authenticated project-list endpoints (backend) — so one run
-# produces one report. TEST_SCENARIO overrides the plan name (scenarios/<name>.jmx).
+# produces one report. TEST_SCENARIO overrides the plan name; an unknown name
+# falls back to the default, so a stale placeholder (e.g. the base image's
+# inherited TEST_SCENARIO=test) can never fail the run.
 SCENARIO=${TEST_SCENARIO:-bng-perf}
+if [ ! -f "${JM_SCENARIOS}/${SCENARIO}.jmx" ]; then
+  echo "WARNING: scenario '${SCENARIO}.jmx' not found in ${JM_SCENARIOS} — falling back to bng-perf" >&2
+  SCENARIO=bng-perf
+fi
 SCENARIOFILE=${JM_SCENARIOS}/${SCENARIO}.jmx
 
 # Per-service targets. The home-page group hits the frontend; the project-list
@@ -41,6 +61,24 @@ BACKEND_PORT=${BACKEND_PORT:-${SERVICE_PORT}}
 # SEED_VIA_API=false to skip (e.g. when the target is already seeded).
 SEED_VIA_API=${SEED_VIA_API:-true}
 
+# One-shot run-config banner. xtrace off so it reads as a clean block and so no
+# secret can ever be echoed here. Surfaces the resolved config up front — the
+# resolved scenario, the two targets, and OIDC_REDIRECT_URI (confirms the
+# non-localhost WAF fix is active) — so a run can be triaged from the first
+# screen of logs.
+set +x
+echo "──────────────────────────── bng-perf-tests run config ────────────────────────────"
+echo "  run_id:              ${RUN_ID:-<unset>}"
+echo "  environment:         ${ENVIRONMENT:-<unset>}"
+echo "  scenario:            ${SCENARIO}"
+echo "  frontend target:     ${SERVICE_URL_SCHEME}://${FRONTEND_DOMAIN}:${FRONTEND_PORT}"
+echo "  backend target:      ${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${BACKEND_PORT}"
+echo "  stub base URL:       ${STUB_BASE_URL}"
+echo "  oidc redirect_uri:   ${OIDC_REDIRECT_URI}"
+echo "  seed via API:        ${SEED_VIA_API} (target ${SEED_PROJECT_COUNT:-5} project(s))"
+echo "────────────────────────────────────────────────────────────────────────────────────"
+set -x
+
 # Mint the cdp-defra-id-stub token for the authenticated backend group. Sets
 # BEARER_TOKEN (and USER_ID to the minted sub when unset). No-op if BEARER_TOKEN
 # is already supplied.
@@ -52,7 +90,7 @@ mint_token() {
   set +x
   echo "▸ minting a cdp-defra-id-stub token from ${STUB_BASE_URL}"
   MINT_ERR=$(mktemp)
-  BEARER_TOKEN=$(STUB_BASE_URL="${STUB_BASE_URL}" node "${JM_HOME}/scripts/get-stub-token.mjs" 2>"${MINT_ERR}")
+  BEARER_TOKEN=$(STUB_BASE_URL="${STUB_BASE_URL}" OIDC_REDIRECT_URI="${OIDC_REDIRECT_URI}" node "${JM_HOME}/scripts/get-stub-token.mjs" 2>"${MINT_ERR}")
   MINT_STATUS=$?
   cat "${MINT_ERR}" >&2
   if [ ${MINT_STATUS} -ne 0 ] || [ -z "${BEARER_TOKEN}" ]; then
@@ -116,7 +154,7 @@ if ! mint_token; then
   echo "ERROR: no stub token — cannot run ${SCENARIO}" >&2
   exit 1
 fi
-if ! seed_via_api "${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${SERVICE_PORT}"; then
+if ! seed_via_api "${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${BACKEND_PORT}"; then
   echo "ERROR: seeding failed — cannot run ${SCENARIO}" >&2
   exit 1
 fi
@@ -169,4 +207,13 @@ if [ ! -f "${JM_REPORTS}/index.html" ]; then
 fi
 aws --endpoint-url=$S3_ENDPOINT s3 cp "${REPORTFILE}" "${RESULTS_OUTPUT_S3_PATH}/${REPORTFILE}"
 aws --endpoint-url=$S3_ENDPOINT s3 cp "${JM_REPORTS}" "${RESULTS_OUTPUT_S3_PATH}" --recursive
-echo "Report published to ${RESULTS_OUTPUT_S3_PATH}"
+
+# End-of-run summary. xtrace off so it stands out as a clean block at the tail.
+set +x
+echo "──────────────────────────── bng-perf-tests summary ───────────────────────────────"
+echo "  run_id: ${RUN_ID:-<unset>} (environment ${ENVIRONMENT:-<unset>})"
+echo "  ${SCENARIO}: RAN — report published to ${RESULTS_OUTPUT_S3_PATH}"
+echo "  NOTE: the project-list group can still show red assertions in the report — that is"
+echo "        by design until the BMD-933 backend fix lands, and does not gate the run."
+echo "────────────────────────────────────────────────────────────────────────────────────"
+set -x
