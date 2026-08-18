@@ -111,10 +111,41 @@ node scenarios/project-list-payload.seed.mjs            # owner: the stub perf u
 node scenarios/project-list-payload.seed.mjs --sub=<other-sub>
 ```
 
-The seed script talks to local Docker only. On the CDP **perf-test** environment it
-cannot reach the managed database, so that environment must be seeded with an equivalent
-big-baseline project owned by the same stub `sub` by other means (e.g. a one-off SQL
-fixture applied through the CDP DB tooling).
+The seed script talks to local Docker only (it `docker exec`s into the compose
+Postgres), so it cannot reach a CDP-managed RDS. For any deployed environment the suite
+seeds through the **backend API instead** — see below.
+
+#### Seeding on CDP — `scripts/seed-via-api.mjs`
+
+`entrypoint.sh` seeds the owner's projects by driving the backend's own
+`POST /projects/new` with the minted stub token, before the first authenticated scenario
+runs. It needs no database access, no GeoPackage upload and no Portal migration — only a
+reachable backend that trusts the stub — so the same step works on **local**, **dev** and
+**perf-test**. It runs at most once per task and is idempotent to a **target count**: it
+first lists what the owner already has and creates only the shortfall, so re-running a
+task never piles rows up. Set `SEED_VIA_API=false` to skip it (e.g. when the environment
+is already seeded another way).
+
+Two properties of the API path shape it:
+
+- **Payload cap.** Hapi's default request-body limit is 1 MB and the create route sets no
+  override, so each project body is sized to a byte budget below that cap. To build a
+  larger corpus the step seeds **several** projects rather than one oversized baseline —
+  which suits the list scenario, since a longer list is what balloons the payload.
+- **No delete.** `POST /projects/new` always inserts a fresh row and the API exposes no
+  project delete, so idempotency is at the target-count level, not a fixed id. If you need
+  a single multi-MB baseline row (bigger than the 1 MB create cap allows), seed it through
+  the DB/Liquibase path instead; the API step cannot.
+
+| Env var              | Default    | Purpose                                                              |
+| -------------------- | ---------- | ------------------------------------------------------------------- |
+| `SEED_VIA_API`       | `true`     | Set `false` to skip API seeding entirely.                           |
+| `SEED_PROJECT_COUNT` | `5`        | Target number of baseline projects the owner should end up with.    |
+| `SEED_BYTE_BUDGET`   | `800000`   | Byte budget per project body; kept under Hapi's 1 MB cap.           |
+
+The `scenarios/project-list-payload.seed.mjs` Docker-Postgres seed remains the faster
+local option (a single fixed-id, large baseline); `seed-via-api.mjs` is the portable
+equivalent for anywhere the DB is out of reach.
 
 > **Local shortcut:** from the harness, `npm run perf` does all of this for you — mints
 > the stub token, seeds the project under its sub, runs JMeter, and prints a per-endpoint

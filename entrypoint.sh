@@ -19,6 +19,13 @@ SERVICE_PORT=${SERVICE_PORT:-443}
 SERVICE_URL_SCHEME=${SERVICE_URL_SCHEME:-https}
 STUB_BASE_URL=${STUB_BASE_URL:-https://cdp-defra-id-stub.${ENVIRONMENT}.cdp-int.defra.cloud/cdp-defra-id-stub}
 
+# Seed baseline projects through the backend API before the authenticated
+# scenarios run, so read scenarios (e.g. project-list-payload) have data to
+# exercise on any environment — no DB access needed. Set SEED_VIA_API=false to
+# skip (e.g. when the target is already seeded by other means).
+SEED_VIA_API=${SEED_VIA_API:-true}
+SEED_DONE=false
+
 # Which suites to run. Default: EVERY scenarios/*.jmx, so a single CDP task
 # exercises the whole suite. TEST_SCENARIO restricts it — one name, or a
 # space-separated list — e.g. TEST_SCENARIO=project-list-payload.
@@ -59,6 +66,30 @@ mint_token_once() {
   fi
   rm -f "${MINT_ERR}"
   set -x
+  return 0
+}
+
+# Seed baseline projects via the backend API at most once per task, sharing the
+# one minted perf user. Idempotent to a target count (scripts/seed-via-api.mjs
+# tops up to SEED_PROJECT_COUNT, never deletes), so re-runs do not pile rows up.
+# $1 = backend base URL (scheme://host:port). No-op when SEED_VIA_API is not true.
+seed_via_api_once() {
+  api_base_url="$1"
+  if [ "${SEED_VIA_API}" != "true" ] || [ "${SEED_DONE}" = "true" ]; then
+    return 0
+  fi
+  # xtrace OFF so BEARER_TOKEN is never echoed into the CDP logs.
+  set +x
+  echo "▸ seeding baseline projects via ${api_base_url}/projects/new"
+  API_BASE_URL="${api_base_url}" BEARER_TOKEN="${BEARER_TOKEN}" \
+    node "${JM_HOME}/scripts/seed-via-api.mjs"
+  SEED_STATUS=$?
+  set -x
+  if [ ${SEED_STATUS} -ne 0 ]; then
+    echo "ERROR: seed-via-api failed against ${api_base_url}" >&2
+    return 1
+  fi
+  SEED_DONE=true
   return 0
 }
 
@@ -120,6 +151,15 @@ for scenario in ${SCENARIOS}; do
 
   if [ "${NEEDS_AUTH}" = "true" ] && ! mint_token_once; then
     echo "ERROR: skipping ${scenario} — no stub token" >&2
+    overall_status=1
+    continue
+  fi
+
+  # Authenticated scenarios read the owner's data; seed it once (per task) before
+  # the first such scenario runs. A seed failure gates that scenario — running it
+  # against an empty owner would prove nothing.
+  if [ "${NEEDS_AUTH}" = "true" ] && ! seed_via_api_once "${SERVICE_URL_SCHEME}://${DOMAIN}:${SERVICE_PORT}"; then
+    echo "ERROR: skipping ${scenario} — seeding failed" >&2
     overall_status=1
     continue
   fi
