@@ -14,7 +14,7 @@ COPY entrypoint.sh .
 COPY user.properties .
 
 ENV S3_ENDPOINT=https://s3.eu-west-2.amazonaws.com
-# No default TEST_SCENARIO: unset means entrypoint.sh runs every scenarios/*.jmx.
-# Set TEST_SCENARIO on the CDP task to restrict the run to specific suites.
+# entrypoint.sh runs the single scenarios/bng-perf.jmx plan by default. Override
+# with TEST_SCENARIO=<name> to point at a different scenarios/<name>.jmx.
 
 ENTRYPOINT [ "./entrypoint.sh" ]

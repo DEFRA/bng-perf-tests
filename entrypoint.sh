@@ -19,30 +19,32 @@ SERVICE_PORT=${SERVICE_PORT:-443}
 SERVICE_URL_SCHEME=${SERVICE_URL_SCHEME:-https}
 STUB_BASE_URL=${STUB_BASE_URL:-https://cdp-defra-id-stub.${ENVIRONMENT}.cdp-int.defra.cloud/cdp-defra-id-stub}
 
-# Seed baseline projects through the backend API before the authenticated
-# scenarios run, so read scenarios (e.g. project-list-payload) have data to
-# exercise on any environment — no DB access needed. Set SEED_VIA_API=false to
-# skip (e.g. when the target is already seeded by other means).
+# The suite is a SINGLE JMeter plan with two thread groups — the public home page
+# (frontend) and the authenticated project-list endpoints (backend) — so one run
+# produces one report. TEST_SCENARIO overrides the plan name (scenarios/<name>.jmx).
+SCENARIO=${TEST_SCENARIO:-bng-perf}
+SCENARIOFILE=${JM_SCENARIOS}/${SCENARIO}.jmx
+
+# Per-service targets. The home-page group hits the frontend; the project-list
+# group hits the backend. SERVICE_ENDPOINT still overrides the BACKEND host (kept
+# for back-compat with existing CDP task config); FRONTEND_DOMAIN / BACKEND_DOMAIN
+# override each host directly. All default to the deterministic CDP hostnames.
+FRONTEND_DOMAIN=${FRONTEND_DOMAIN:-bng-metric-frontend.${ENVIRONMENT}.cdp-int.defra.cloud}
+BACKEND_DOMAIN=${SERVICE_ENDPOINT:-${BACKEND_DOMAIN:-bng-metric-backend.${ENVIRONMENT}.cdp-int.defra.cloud}}
+# Ports default to the shared SERVICE_PORT; override per service when the two
+# hosts differ (e.g. a local stack: frontend :3000, backend :3001).
+FRONTEND_PORT=${FRONTEND_PORT:-${SERVICE_PORT}}
+BACKEND_PORT=${BACKEND_PORT:-${SERVICE_PORT}}
+
+# Seed baseline projects through the backend API before the run, so the list
+# endpoints have data to exercise on any environment — no DB access needed. Set
+# SEED_VIA_API=false to skip (e.g. when the target is already seeded).
 SEED_VIA_API=${SEED_VIA_API:-true}
-SEED_DONE=false
 
-# Which suites to run. Default: EVERY scenarios/*.jmx, so a single CDP task
-# exercises the whole suite. TEST_SCENARIO restricts it — one name, or a
-# space-separated list — e.g. TEST_SCENARIO=project-list-payload.
-if [ -n "${TEST_SCENARIO}" ]; then
-  SCENARIOS="${TEST_SCENARIO}"
-else
-  SCENARIOS=""
-  for f in ${JM_SCENARIOS}/*.jmx; do
-    [ -e "${f}" ] || continue
-    SCENARIOS="${SCENARIOS} $(basename "${f}" .jmx)"
-  done
-fi
-
-# Mint the cdp-defra-id-stub token lazily and at most once per task — every
-# authenticated scenario shares the one perf user. Sets BEARER_TOKEN (and USER_ID
-# to the minted sub when unset). No-op if BEARER_TOKEN is already supplied.
-mint_token_once() {
+# Mint the cdp-defra-id-stub token for the authenticated backend group. Sets
+# BEARER_TOKEN (and USER_ID to the minted sub when unset). No-op if BEARER_TOKEN
+# is already supplied.
+mint_token() {
   if [ -n "${BEARER_TOKEN}" ]; then
     return 0
   fi
@@ -69,13 +71,13 @@ mint_token_once() {
   return 0
 }
 
-# Seed baseline projects via the backend API at most once per task, sharing the
-# one minted perf user. Idempotent to a target count (scripts/seed-via-api.mjs
-# tops up to SEED_PROJECT_COUNT, never deletes), so re-runs do not pile rows up.
+# Seed baseline projects via the backend API, sharing the minted perf user.
+# Idempotent to a target count (scripts/seed-via-api.mjs tops up to
+# SEED_PROJECT_COUNT, never deletes), so re-runs do not pile rows up.
 # $1 = backend base URL (scheme://host:port). No-op when SEED_VIA_API is not true.
-seed_via_api_once() {
+seed_via_api() {
   api_base_url="$1"
-  if [ "${SEED_VIA_API}" != "true" ] || [ "${SEED_DONE}" = "true" ]; then
+  if [ "${SEED_VIA_API}" != "true" ]; then
     return 0
   fi
   # xtrace OFF so BEARER_TOKEN is never echoed into the CDP logs.
@@ -89,7 +91,6 @@ seed_via_api_once() {
     echo "ERROR: seed-via-api failed against ${api_base_url}" >&2
     return 1
   fi
-  SEED_DONE=true
   return 0
 }
 
@@ -101,100 +102,71 @@ add_prop() {
   fi
 }
 
-# Publish one scenario's report + CSV under a per-scenario prefix in S3, so a
-# multi-scenario run keeps every dashboard rather than overwriting a shared path.
-publish_results() {
-  scenario="$1"
-  report_dir="$2"
-  csv="$3"
-  if [ -z "${RESULTS_OUTPUT_S3_PATH}" ]; then
-    echo "RESULTS_OUTPUT_S3_PATH is not set — skipping S3 publish for ${scenario}"
-    return 0
-  fi
-  if [ -f "${report_dir}/index.html" ]; then
-    dest="${RESULTS_OUTPUT_S3_PATH}/${scenario}"
-    aws --endpoint-url=$S3_ENDPOINT s3 cp "${csv}" "${dest}/${csv}"
-    aws --endpoint-url=$S3_ENDPOINT s3 cp "${report_dir}" "${dest}" --recursive
-    echo "Results for ${scenario} published to ${dest}"
-    return 0
-  fi
-  echo "${report_dir}/index.html not found for ${scenario} — nothing to publish" >&2
-  return 1
-}
+if [ ! -f "${SCENARIOFILE}" ]; then
+  echo "ERROR: scenario ${SCENARIO}.jmx not found in ${JM_SCENARIOS}" >&2
+  exit 1
+fi
 
-# Non-zero if any scenario hit an infrastructure failure (missing file, mint
-# failure, no report). Assertion failures do NOT gate: project-list-payload
-# encodes unshipped BMD-933 acceptance criteria and is red by design until the
-# backend fix lands.
-overall_status=0
+echo "=== Scenario: ${SCENARIO} (frontend=${FRONTEND_DOMAIN}, backend=${BACKEND_DOMAIN}) ==="
 
-for scenario in ${SCENARIOS}; do
-  SCENARIOFILE=${JM_SCENARIOS}/${scenario}.jmx
-  if [ ! -f "${SCENARIOFILE}" ]; then
-    echo "ERROR: scenario ${scenario}.jmx not found in ${JM_SCENARIOS}" >&2
-    overall_status=1
-    continue
-  fi
+# The plan drives the authenticated backend endpoints, so a token and seeded data
+# are prerequisites — both gate the run. Running the list group against an empty
+# owner, or with no token, would prove nothing.
+if ! mint_token; then
+  echo "ERROR: no stub token — cannot run ${SCENARIO}" >&2
+  exit 1
+fi
+if ! seed_via_api "${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${SERVICE_PORT}"; then
+  echo "ERROR: seeding failed — cannot run ${SCENARIO}" >&2
+  exit 1
+fi
 
-  echo "=== Scenario: ${scenario} ==="
+# Assemble properties with xtrace OFF so `set -x` never echoes BEARER_TOKEN. JWTs
+# and the numeric tunables contain no whitespace, so leaving ${SCENARIO_PROPS}
+# unquoted to word-split into separate args is safe.
+set +x
+SCENARIO_PROPS=""
+add_prop bearerToken "${BEARER_TOKEN}"
+add_prop userId "${USER_ID}"
+add_prop maxResponseMs "${MAX_RESPONSE_MS}"
+add_prop homeThreads "${HOME_THREADS}"
+add_prop homeRampSeconds "${HOME_RAMP_SECONDS}"
+add_prop homeLoops "${HOME_LOOPS}"
+add_prop listThreads "${LIST_THREADS}"
+add_prop listRampSeconds "${LIST_RAMP_SECONDS}"
+add_prop listLoops "${LIST_LOOPS}"
+add_prop listSizeLimitBytes "${LIST_SIZE_LIMIT_BYTES}"
+add_prop listMaxLatencyMs "${LIST_MAX_LATENCY_MS}"
+add_prop limit "${LIST_LIMIT}"
+add_prop offset "${LIST_OFFSET}"
 
-  # Per-scenario target: a scenario that reads bearerToken drives the backend API
-  # and needs a token; anything else targets the public frontend unauthenticated.
-  if grep -q "__P(bearerToken" "${SCENARIOFILE}" 2>/dev/null; then
-    DEFAULT_SERVICE=bng-metric-backend
-    NEEDS_AUTH=true
-  else
-    DEFAULT_SERVICE=bng-metric-frontend
-    NEEDS_AUTH=false
-  fi
-  DOMAIN=${SERVICE_ENDPOINT:-${DEFAULT_SERVICE}.${ENVIRONMENT}.cdp-int.defra.cloud}
+REPORTFILE=${NOW}-perftest-${SCENARIO}-report.csv
+LOGFILE=${JM_LOGS}/perftest-${SCENARIO}.log
 
-  if [ "${NEEDS_AUTH}" = "true" ] && ! mint_token_once; then
-    echo "ERROR: skipping ${scenario} — no stub token" >&2
-    overall_status=1
-    continue
-  fi
-
-  # Authenticated scenarios read the owner's data; seed it once (per task) before
-  # the first such scenario runs. A seed failure gates that scenario — running it
-  # against an empty owner would prove nothing.
-  if [ "${NEEDS_AUTH}" = "true" ] && ! seed_via_api_once "${SERVICE_URL_SCHEME}://${DOMAIN}:${SERVICE_PORT}"; then
-    echo "ERROR: skipping ${scenario} — seeding failed" >&2
-    overall_status=1
-    continue
-  fi
-
-  # Assemble properties with xtrace OFF so `set -x` never echoes BEARER_TOKEN.
-  # JWTs and the numeric tunables contain no whitespace, so leaving
-  # ${SCENARIO_PROPS} unquoted to word-split into separate args is safe.
-  set +x
-  SCENARIO_PROPS=""
-  if [ "${NEEDS_AUTH}" = "true" ]; then
-    add_prop bearerToken "${BEARER_TOKEN}"
-    add_prop userId "${USER_ID}"
-  fi
-  add_prop threads "${LIST_THREADS}"
-  add_prop rampSeconds "${LIST_RAMP_SECONDS}"
-  add_prop loops "${LIST_LOOPS}"
-  add_prop listSizeLimitBytes "${LIST_SIZE_LIMIT_BYTES}"
-  add_prop listMaxLatencyMs "${LIST_MAX_LATENCY_MS}"
-  add_prop limit "${LIST_LIMIT}"
-  add_prop offset "${LIST_OFFSET}"
-
-  REPORT_DIR=${JM_REPORTS}/${scenario}
-  LOGFILE=${JM_LOGS}/perftest-${scenario}.log
-  REPORTFILE=${NOW}-perftest-${scenario}-report.csv
-
-  # -f forces JMeter to overwrite an existing results file / report folder.
-  jmeter -n -t ${SCENARIOFILE} -e -l "${REPORTFILE}" -o ${REPORT_DIR} -j ${LOGFILE} -f \
+# -f forces JMeter to overwrite an existing results file / report folder.
+jmeter -n -t ${SCENARIOFILE} -e -l "${REPORTFILE}" -o ${JM_REPORTS} -j ${LOGFILE} -f \
   -Jenv="${ENVIRONMENT}" \
-  -Jdomain="${DOMAIN}" \
+  -JfrontendDomain="${FRONTEND_DOMAIN}" \
+  -JbackendDomain="${BACKEND_DOMAIN}" \
+  -JfrontendPort="${FRONTEND_PORT}" \
+  -JbackendPort="${BACKEND_PORT}" \
   -Jport="${SERVICE_PORT}" \
   -Jprotocol="${SERVICE_URL_SCHEME}" \
   ${SCENARIO_PROPS}
-  set -x
+set -x
 
-  publish_results "${scenario}" "${REPORT_DIR}" "${REPORTFILE}" || overall_status=1
-done
-
-exit ${overall_status}
+# Publish the single dashboard at the ROOT of the results prefix — the object the
+# CDP portal serves as the report. Assertion failures do NOT gate: the list group
+# encodes unshipped BMD-933 acceptance criteria and is red by design until the
+# backend fix lands. Only an infrastructure failure (no report) gates here.
+if [ -z "${RESULTS_OUTPUT_S3_PATH}" ]; then
+  echo "RESULTS_OUTPUT_S3_PATH is not set — skipping S3 publish"
+  exit 0
+fi
+if [ ! -f "${JM_REPORTS}/index.html" ]; then
+  echo "ERROR: ${JM_REPORTS}/index.html not found — nothing to publish" >&2
+  exit 1
+fi
+aws --endpoint-url=$S3_ENDPOINT s3 cp "${REPORTFILE}" "${RESULTS_OUTPUT_S3_PATH}/${REPORTFILE}"
+aws --endpoint-url=$S3_ENDPOINT s3 cp "${JM_REPORTS}" "${RESULTS_OUTPUT_S3_PATH}" --recursive
+echo "Report published to ${RESULTS_OUTPUT_S3_PATH}"

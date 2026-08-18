@@ -1,44 +1,49 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
   <hashTree>
-    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="BMD-933 project list payload">
-      <stringProp name="TestPlan.comments">Covers BMD-933 "Only load the project details the list page actually needs".
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="bng perf">
+      <stringProp name="TestPlan.comments">The BNG performance suite as ONE plan, so a run produces ONE JMeter report.
 
-The two list endpoints — GET /users/{userId}/projects and GET /projects — currently
-SELECT every column and spread the whole JSONB document into each row, so every
-visible project ships its entire baseline/postIntervention body (~3 KB/parcel, MBs at
-scale) even though the list view only renders id, name, createdAt, updatedAt. This
-scenario drives both list endpoints under concurrency and asserts the acceptance
-criteria, so it FAILS against an unfixed backend and PASSES once the projection +
-limit/offset fix lands:
+Two thread groups run against two services in a single execution:
 
-  1. Size Assertion — list payload stays under listSizeLimitBytes regardless of
-     baseline size ("response size is flat regardless of baseline size").
-  2. Response Assertion — payload does NOT contain the document-body-only keys
-     "habitats" / "postIntervention" ("list responses exclude the document body").
-  3. Response Assertion — payload DOES contain "has_baseline" (the projected flag).
-  4. A paginated request per endpoint asserts 200 ("both list endpoints accept
-     limit/offset"). Pre-fix the users endpoint 400s on unknown query params.
-  5. Duration Assertion — guards against the multi-second event-loop stall a
-     multi-MB synchronous JSON.stringify causes under concurrency.
+  1. "Home page" — GET / on the public FRONTEND (no auth). A smoke check that the
+     home page loads and returns 200 within maxResponseMs.
 
-REQUIRES a seeded environment: at least one project visible to the token's user that
-has a baseline uploaded (ideally a large, multi-thousand-parcel one) — otherwise the
-has_baseline / document-body assertions have nothing to exercise.
+  2. "Project list endpoints" — the authenticated BACKEND list endpoints, covering
+     BMD-933 "Only load the project details the list page actually needs". Drives
+     GET /users/{userId}/projects and GET /projects under concurrency and asserts:
+       AC1 Size Assertion   — list payload under listSizeLimitBytes (flat vs baseline size)
+       AC2 Response Assertion — payload excludes the document-body keys habitats/postIntervention
+       AC3 Response Assertion — payload includes the projected has_baseline flag
+       AC4 Response Assertion — both endpoints accept limit/offset and return 200
+       Duration Assertion   — guards the multi-second stall a multi-MB JSON.stringify causes
+     This group is RED by design against an unfixed backend and PASSES once the
+     projection + limit/offset fix lands. It REQUIRES a seeded environment (a project
+     with a baseline visible to the token's user) — entrypoint.sh seeds via the API.
+
+The auth header is scoped to the backend group only, so the frontend request is
+sent unauthenticated. Each group targets its own host, so one run hits both.
 
 Runtime properties (all overridable with -J..., wired from env vars in entrypoint.sh):
-  bearerToken         Bearer token for the request. No default — supplied at run
-                      time: entrypoint.sh mints a real cdp-defra-id-stub token
-                      (scripts/get-stub-token.mjs) unless BEARER_TOKEN is preset.
-  userId              path segment for /users/{userId}/projects (the handler trusts
-                      the token sub, not this value). Default: me
-  listSizeLimitBytes  max allowed list response size in bytes. Default: 262144 (256 KB)
-  listMaxLatencyMs    max allowed list response time in ms. Default: 2000
-  limit / offset      pagination params exercised against both endpoints. Default 50 / 0
-  threads / rampSeconds / loops  load profile. Default 10 / 10 / 20
-  domain / port / protocol / env  target service (set SERVICE_ENDPOINT to the backend)</stringProp>
+  frontendDomain / backendDomain   per-service hosts (default *.${env}.cdp-int.defra.cloud)
+  port / protocol / env            shared target port/scheme/environment
+  bearerToken                      Bearer token for the backend group. No default —
+                                   entrypoint.sh mints a real cdp-defra-id-stub token.
+  userId                           path segment for /users/{userId}/projects (the handler
+                                   trusts the token sub, not this value). Default: me
+  maxResponseMs                    home-page per-request time budget (default 2000)
+  listSizeLimitBytes               max backend list response size (default 262144 = 256 KB)
+  listMaxLatencyMs                 max backend list response time (default 2000)
+  limit / offset                   pagination params exercised on both endpoints (default 50 / 0)
+  homeThreads / homeRampSeconds / homeLoops   home-page load profile (default 1 / 1 / 5)
+  listThreads / listRampSeconds / listLoops   backend load profile (default 10 / 10 / 20)</stringProp>
       <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
         <collectionProp name="Arguments.arguments">
+          <elementProp name="maxResponseMs" elementType="Argument">
+            <stringProp name="Argument.name">maxResponseMs</stringProp>
+            <stringProp name="Argument.value">${__P(maxResponseMs,2000)}</stringProp>
+            <stringProp name="Argument.metadata">=</stringProp>
+          </elementProp>
           <elementProp name="bearerToken" elementType="Argument">
             <stringProp name="Argument.name">bearerToken</stringProp>
             <stringProp name="Argument.value">${__P(bearerToken,)}</stringProp>
@@ -73,41 +78,81 @@ Runtime properties (all overridable with -J..., wired from env vars in entrypoin
       </elementProp>
     </TestPlan>
     <hashTree>
-      <ConfigTestElement guiclass="HttpDefaultsGui" testclass="ConfigTestElement" testname="HTTP Request Defaults">
-        <stringProp name="HTTPSampler.domain">${__P(domain, bng-metric-backend.${__P(env)}.cdp-int.defra.cloud)}</stringProp>
-        <stringProp name="HTTPSampler.protocol">${__P(protocol, https)}</stringProp>
-        <stringProp name="HTTPSampler.port">${__P(port, 443)}</stringProp>
-        <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
-        <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
-        <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
-          <collectionProp name="Arguments.arguments"/>
-        </elementProp>
-      </ConfigTestElement>
-      <hashTree/>
-      <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="Auth + Accept headers">
-        <collectionProp name="HeaderManager.headers">
-          <elementProp name="" elementType="Header">
-            <stringProp name="Header.name">Authorization</stringProp>
-            <stringProp name="Header.value">Bearer ${bearerToken}</stringProp>
-          </elementProp>
-          <elementProp name="" elementType="Header">
-            <stringProp name="Header.name">Accept</stringProp>
-            <stringProp name="Header.value">application/json</stringProp>
-          </elementProp>
-        </collectionProp>
-      </HeaderManager>
-      <hashTree/>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Project list endpoints">
-        <stringProp name="ThreadGroup.num_threads">${__P(threads,10)}</stringProp>
-        <stringProp name="ThreadGroup.ramp_time">${__P(rampSeconds,10)}</stringProp>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Home page">
+        <stringProp name="ThreadGroup.num_threads">${__P(homeThreads,1)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(homeRampSeconds,1)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
-          <stringProp name="LoopController.loops">${__P(loops,20)}</stringProp>
+          <stringProp name="LoopController.loops">${__P(homeLoops,5)}</stringProp>
           <boolProp name="LoopController.continue_forever">false</boolProp>
         </elementProp>
       </ThreadGroup>
       <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="GET / (home page)">
+          <stringProp name="HTTPSampler.domain">${__P(frontendDomain, bng-metric-frontend.${__P(env)}.cdp-int.defra.cloud)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${__P(protocol, https)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(frontendPort, ${__P(port, 443)})}</stringProp>
+          <stringProp name="HTTPSampler.path">/</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <stringProp name="HTTPSampler.method">GET</stringProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">false</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+            <collectionProp name="Arguments.arguments"/>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Status 200">
+            <collectionProp name="Asserion.test_strings">
+              <stringProp name="49586">200</stringProp>
+            </collectionProp>
+            <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+            <boolProp name="Assertion.assume_success">false</boolProp>
+            <intProp name="Assertion.test_type">8</intProp>
+          </ResponseAssertion>
+          <hashTree/>
+          <DurationAssertion guiclass="DurationAssertionGui" testclass="DurationAssertion" testname="Loads within maxResponseMs">
+            <stringProp name="DurationAssertion.duration">${maxResponseMs}</stringProp>
+          </DurationAssertion>
+          <hashTree/>
+        </hashTree>
+      </hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Project list endpoints">
+        <stringProp name="ThreadGroup.num_threads">${__P(listThreads,10)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(listRampSeconds,10)}</stringProp>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
+          <stringProp name="LoopController.loops">${__P(listLoops,20)}</stringProp>
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <ConfigTestElement guiclass="HttpDefaultsGui" testclass="ConfigTestElement" testname="HTTP Request Defaults">
+          <stringProp name="HTTPSampler.domain">${__P(backendDomain, bng-metric-backend.${__P(env)}.cdp-int.defra.cloud)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${__P(protocol, https)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(backendPort, ${__P(port, 443)})}</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+            <collectionProp name="Arguments.arguments"/>
+          </elementProp>
+        </ConfigTestElement>
+        <hashTree/>
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="Auth + Accept headers">
+          <collectionProp name="HeaderManager.headers">
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Authorization</stringProp>
+              <stringProp name="Header.value">Bearer ${bearerToken}</stringProp>
+            </elementProp>
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Accept</stringProp>
+              <stringProp name="Header.value">application/json</stringProp>
+            </elementProp>
+          </collectionProp>
+        </HeaderManager>
+        <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="GET /users/{userId}/projects">
           <stringProp name="HTTPSampler.path">/users/${userId}/projects</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>

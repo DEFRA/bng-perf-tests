@@ -36,10 +36,18 @@ services:
     environment:
       S3_ENDPOINT: 'http://localstack:4566'
       RESULTS_OUTPUT_S3_PATH: 's3://test-results'
-      TEST_SCENARIO: ${TEST_SCENARIO:-home-page}
+      TEST_SCENARIO: ${TEST_SCENARIO:-bng-perf}
       ENVIRONMENT: ${ENVIRONMENT:-local}
-      SERVICE_ENDPOINT: ${SERVICE_ENDPOINT:-host.docker.internal}
-      SERVICE_PORT: ${SERVICE_PORT:-3000}
+      # The plan hits BOTH the frontend (home page) and the authenticated backend
+      # (project list). A full local stack is needed for the backend group + the
+      # cdp-defra-id-stub token mint + seeding; point each host explicitly. To
+      # smoke only the frontend, set SEED_VIA_API=false and BACKEND_DOMAIN to a
+      # reachable backend, or target a deployed env via FRONTEND_DOMAIN/BACKEND_DOMAIN.
+      FRONTEND_DOMAIN: ${FRONTEND_DOMAIN:-host.docker.internal}
+      BACKEND_DOMAIN: ${BACKEND_DOMAIN:-host.docker.internal}
+      FRONTEND_PORT: ${FRONTEND_PORT:-3000}
+      BACKEND_PORT: ${BACKEND_PORT:-3001}
+      STUB_BASE_URL: ${STUB_BASE_URL:-http://host.docker.internal:3200/cdp-defra-id-stub}
       SERVICE_URL_SCHEME: ${SERVICE_URL_SCHEME:-http}
     networks:
       - performance-tests
