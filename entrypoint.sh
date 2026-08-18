@@ -19,6 +19,20 @@ SERVICE_PORT=${SERVICE_PORT:-443}
 SERVICE_URL_SCHEME=${SERVICE_URL_SCHEME:-https}
 STUB_BASE_URL=${STUB_BASE_URL:-https://cdp-defra-id-stub.${ENVIRONMENT}.cdp-int.defra.cloud/cdp-defra-id-stub}
 
+# Redirect URI presented during the stub OIDC dance. The stub echoes the auth
+# code back to whatever redirect_uri is given (it does not validate it against a
+# registered client), and get-stub-token.mjs reads the code straight off the 302
+# Location without ever calling the URL — so this only has to be a string, not a
+# reachable endpoint. It MUST NOT contain `localhost`, though: on CDP the WAF
+# 403s an /authorize request whose query carries a localhost/SSRF-looking target
+# (that is what failed the perf-test run). Use the deployed frontend's callback
+# on CDP; local (no WAF) keeps the real localhost callback.
+if [ "${ENVIRONMENT}" = "local" ]; then
+  OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-http://localhost:3000/auth/callback}
+else
+  OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-https://bng-metric-frontend.${ENVIRONMENT}.cdp-int.defra.cloud/auth/callback}
+fi
+
 # Seed baseline projects through the backend API before the authenticated
 # scenarios run, so read scenarios (e.g. project-list-payload) have data to
 # exercise on any environment — no DB access needed. Set SEED_VIA_API=false to
@@ -63,6 +77,23 @@ if [ -z "$(echo ${SCENARIOS})" ]; then
   SCENARIOS="$(all_scenarios)"
 fi
 
+# One-shot run-config banner. xtrace off so it reads as a clean block and so no
+# secret can ever be echoed here. Surfaces the resolved config up front — in
+# particular the resolved scenario list (confirms TEST_SCENARIO handling) and
+# OIDC_REDIRECT_URI (confirms the non-localhost WAF fix is active) — so a run can
+# be triaged, and the fixes confirmed effective, from the first screen of logs.
+set +x
+echo "──────────────────────────── bng-perf-tests run config ────────────────────────────"
+echo "  run_id:              ${RUN_ID:-<unset>}"
+echo "  environment:         ${ENVIRONMENT:-<unset>}"
+echo "  requested scenario:  ${TEST_SCENARIO:-<all>}"
+echo "  scenarios to run:    $(echo ${SCENARIOS})"
+echo "  stub base URL:       ${STUB_BASE_URL}"
+echo "  oidc redirect_uri:   ${OIDC_REDIRECT_URI}"
+echo "  seed via API:        ${SEED_VIA_API} (target ${SEED_PROJECT_COUNT:-5} project(s))"
+echo "────────────────────────────────────────────────────────────────────────────────────"
+set -x
+
 # Mint the cdp-defra-id-stub token lazily and at most once per task — every
 # authenticated scenario shares the one perf user. Sets BEARER_TOKEN (and USER_ID
 # to the minted sub when unset). No-op if BEARER_TOKEN is already supplied.
@@ -74,7 +105,7 @@ mint_token_once() {
   set +x
   echo "▸ minting a cdp-defra-id-stub token from ${STUB_BASE_URL}"
   MINT_ERR=$(mktemp)
-  BEARER_TOKEN=$(STUB_BASE_URL="${STUB_BASE_URL}" node "${JM_HOME}/scripts/get-stub-token.mjs" 2>"${MINT_ERR}")
+  BEARER_TOKEN=$(STUB_BASE_URL="${STUB_BASE_URL}" OIDC_REDIRECT_URI="${OIDC_REDIRECT_URI}" node "${JM_HOME}/scripts/get-stub-token.mjs" 2>"${MINT_ERR}")
   MINT_STATUS=$?
   cat "${MINT_ERR}" >&2
   if [ ${MINT_STATUS} -ne 0 ] || [ -z "${BEARER_TOKEN}" ]; then
@@ -152,10 +183,19 @@ publish_results() {
 # backend fix lands.
 overall_status=0
 
+# Accumulate a one-line-per-scenario outcome so the end-of-run summary is legible
+# without scrolling the whole xtrace. The trailing newline is intentional.
+RUN_SUMMARY=""
+record_outcome() {
+  RUN_SUMMARY="${RUN_SUMMARY}  ${1}: ${2}
+"
+}
+
 for scenario in ${SCENARIOS}; do
   SCENARIOFILE=${JM_SCENARIOS}/${scenario}.jmx
   if [ ! -f "${SCENARIOFILE}" ]; then
     echo "ERROR: scenario ${scenario}.jmx not found in ${JM_SCENARIOS}" >&2
+    record_outcome "${scenario}" "MISSING — no .jmx"
     overall_status=1
     continue
   fi
@@ -175,6 +215,7 @@ for scenario in ${SCENARIOS}; do
 
   if [ "${NEEDS_AUTH}" = "true" ] && ! mint_token_once; then
     echo "ERROR: skipping ${scenario} — no stub token" >&2
+    record_outcome "${scenario}" "SKIPPED — token mint failed"
     overall_status=1
     continue
   fi
@@ -184,6 +225,7 @@ for scenario in ${SCENARIOS}; do
   # against an empty owner would prove nothing.
   if [ "${NEEDS_AUTH}" = "true" ] && ! seed_via_api_once "${SERVICE_URL_SCHEME}://${DOMAIN}:${SERVICE_PORT}"; then
     echo "ERROR: skipping ${scenario} — seeding failed" >&2
+    record_outcome "${scenario}" "SKIPPED — seeding failed"
     overall_status=1
     continue
   fi
@@ -218,7 +260,27 @@ for scenario in ${SCENARIOS}; do
   ${SCENARIO_PROPS}
   set -x
 
-  publish_results "${scenario}" "${REPORT_DIR}" "${REPORTFILE}" || overall_status=1
+  if publish_results "${scenario}" "${REPORT_DIR}" "${REPORTFILE}"; then
+    record_outcome "${scenario}" "RAN — report published (assertion pass/fail is in the report)"
+  else
+    record_outcome "${scenario}" "NO REPORT — JMeter produced nothing to publish"
+    overall_status=1
+  fi
 done
+
+# End-of-run summary. xtrace off so it stands out as a clean block at the tail.
+set +x
+echo "──────────────────────────── bng-perf-tests summary ───────────────────────────────"
+echo "  run_id: ${RUN_ID:-<unset>} (environment ${ENVIRONMENT:-<unset>})"
+printf '%s' "${RUN_SUMMARY}"
+if [ ${overall_status} -eq 0 ]; then
+  echo "  → all scenarios ran and published — no infrastructure failures"
+else
+  echo "  → one or more infrastructure failures (mint / seed / missing / no-report) — see ERRORs above"
+fi
+echo "  NOTE: a RAN scenario can still show red assertions in its report — that is by design"
+echo "        for project-list-payload until the BMD-933 backend fix lands, and does not gate."
+echo "────────────────────────────────────────────────────────────────────────────────────"
+set -x
 
 exit ${overall_status}
