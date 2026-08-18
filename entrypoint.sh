@@ -19,6 +19,20 @@ SERVICE_PORT=${SERVICE_PORT:-443}
 SERVICE_URL_SCHEME=${SERVICE_URL_SCHEME:-https}
 STUB_BASE_URL=${STUB_BASE_URL:-https://cdp-defra-id-stub.${ENVIRONMENT}.cdp-int.defra.cloud/cdp-defra-id-stub}
 
+# Redirect URI presented during the stub OIDC dance. The stub echoes the auth
+# code back to whatever redirect_uri is given (it does not validate it against a
+# registered client), and get-stub-token.mjs reads the code straight off the 302
+# Location without ever calling the URL — so this only has to be a string, not a
+# reachable endpoint. It MUST NOT contain `localhost`, though: on CDP the WAF
+# 403s an /authorize request whose query carries a localhost/SSRF-looking target
+# (that is what failed the perf-test run). Use the deployed frontend's callback
+# on CDP; local (no WAF) keeps the real localhost callback.
+if [ "${ENVIRONMENT}" = "local" ]; then
+  OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-http://localhost:3000/auth/callback}
+else
+  OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-https://bng-metric-frontend.${ENVIRONMENT}.cdp-int.defra.cloud/auth/callback}
+fi
+
 # Seed baseline projects through the backend API before the authenticated
 # scenarios run, so read scenarios (e.g. project-list-payload) have data to
 # exercise on any environment — no DB access needed. Set SEED_VIA_API=false to
@@ -74,7 +88,7 @@ mint_token_once() {
   set +x
   echo "▸ minting a cdp-defra-id-stub token from ${STUB_BASE_URL}"
   MINT_ERR=$(mktemp)
-  BEARER_TOKEN=$(STUB_BASE_URL="${STUB_BASE_URL}" node "${JM_HOME}/scripts/get-stub-token.mjs" 2>"${MINT_ERR}")
+  BEARER_TOKEN=$(STUB_BASE_URL="${STUB_BASE_URL}" OIDC_REDIRECT_URI="${OIDC_REDIRECT_URI}" node "${JM_HOME}/scripts/get-stub-token.mjs" 2>"${MINT_ERR}")
   MINT_STATUS=$?
   cat "${MINT_ERR}" >&2
   if [ ${MINT_STATUS} -ne 0 ] || [ -z "${BEARER_TOKEN}" ]; then
