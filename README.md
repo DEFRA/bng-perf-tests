@@ -19,8 +19,11 @@ The CDP Platform runs test suites in much the same way it runs any other service
 
 Each `.jmx` under `scenarios/` is one suite. By default `entrypoint.sh` runs **every**
 scenario in `scenarios/` in one task, resolving each suite's target and auth from the
-scenario itself. Set `TEST_SCENARIO` to restrict the run to one suite (or a
-space-separated list), e.g. `TEST_SCENARIO=project-list-payload`.
+scenario itself. Set `TEST_SCENARIO` to restrict the run to one suite (or a space- or
+comma-separated list), e.g. `TEST_SCENARIO=project-list-payload`. A requested name with
+no matching `.jmx` is skipped with a warning, and if none of the requested names resolve
+the task falls back to running every scenario — so a stale placeholder value on the CDP
+task (e.g. `TEST_SCENARIO=test`) never fails the whole run.
 
 | Scenario                | Targets               | Covers                                                                 |
 | ----------------------- | --------------------- | ---------------------------------------------------------------------- |
