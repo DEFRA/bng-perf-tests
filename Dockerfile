@@ -14,7 +14,9 @@ COPY entrypoint.sh .
 COPY user.properties .
 
 ENV S3_ENDPOINT=https://s3.eu-west-2.amazonaws.com
-# No default TEST_SCENARIO: unset means entrypoint.sh runs every scenarios/*.jmx.
-# Set TEST_SCENARIO on the CDP task to restrict the run to specific suites.
+# The base image (defradigital/cdp-perf-test-docker) bakes in ENV TEST_SCENARIO=test
+# for its own sample test.jmx, which we do not ship. Clear it so an unset value means
+# "run every scenarios/*.jmx"; set TEST_SCENARIO on the CDP task to restrict the run.
+ENV TEST_SCENARIO=""
 
 ENTRYPOINT [ "./entrypoint.sh" ]

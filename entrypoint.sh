@@ -26,17 +26,41 @@ STUB_BASE_URL=${STUB_BASE_URL:-https://cdp-defra-id-stub.${ENVIRONMENT}.cdp-int.
 SEED_VIA_API=${SEED_VIA_API:-true}
 SEED_DONE=false
 
-# Which suites to run. Default: EVERY scenarios/*.jmx, so a single CDP task
-# exercises the whole suite. TEST_SCENARIO restricts it — one name, or a
-# space-separated list — e.g. TEST_SCENARIO=project-list-payload.
-if [ -n "${TEST_SCENARIO}" ]; then
-  SCENARIOS="${TEST_SCENARIO}"
-else
-  SCENARIOS=""
+# Discover every scenarios/*.jmx into RUN by basename — the default run, and the
+# fallback when a requested scenario cannot be resolved.
+all_scenarios() {
+  found=""
   for f in ${JM_SCENARIOS}/*.jmx; do
     [ -e "${f}" ] || continue
-    SCENARIOS="${SCENARIOS} $(basename "${f}" .jmx)"
+    found="${found} $(basename "${f}" .jmx)"
   done
+  echo "${found}"
+}
+
+# Which suites to run. Default: EVERY scenarios/*.jmx, so a single CDP task
+# exercises the whole suite. TEST_SCENARIO restricts it — one or more names,
+# space- OR comma-separated, e.g. TEST_SCENARIO=project-list-payload.
+#
+# A requested name that has no .jmx is skipped with a warning rather than
+# aborting the task, and if NONE of the requested names resolve we fall back to
+# running every scenario. This keeps a stale/placeholder value on the CDP task
+# (e.g. the template default TEST_SCENARIO=test) from failing the whole run.
+SCENARIOS=""
+if [ -n "${TEST_SCENARIO}" ]; then
+  for name in $(echo "${TEST_SCENARIO}" | tr ',' ' '); do
+    if [ -f "${JM_SCENARIOS}/${name}.jmx" ]; then
+      SCENARIOS="${SCENARIOS} ${name}"
+    else
+      echo "WARNING: requested scenario '${name}.jmx' not found in ${JM_SCENARIOS} — skipping" >&2
+    fi
+  done
+fi
+# `echo` collapses whitespace, so this is true when SCENARIOS is empty or blank.
+if [ -z "$(echo ${SCENARIOS})" ]; then
+  if [ -n "${TEST_SCENARIO}" ]; then
+    echo "WARNING: no requested scenario in TEST_SCENARIO='${TEST_SCENARIO}' resolved — running all scenarios" >&2
+  fi
+  SCENARIOS="$(all_scenarios)"
 fi
 
 # Mint the cdp-defra-id-stub token lazily and at most once per task — every
