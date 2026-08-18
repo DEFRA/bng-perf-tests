@@ -116,10 +116,40 @@ publish_results() {
     aws --endpoint-url=$S3_ENDPOINT s3 cp "${csv}" "${dest}/${csv}"
     aws --endpoint-url=$S3_ENDPOINT s3 cp "${report_dir}" "${dest}" --recursive
     echo "Results for ${scenario} published to ${dest}"
+    PUBLISHED_SCENARIOS="${PUBLISHED_SCENARIOS} ${scenario}"
     return 0
   fi
   echo "${report_dir}/index.html not found for ${scenario} — nothing to publish" >&2
   return 1
+}
+
+# Every scenario publishes its JMeter dashboard under its own <scenario>/ prefix,
+# so a multi-scenario run has NO index.html at the root of the results prefix —
+# which is the object the CDP portal serves as the report. Without it the portal
+# shows "No report found" even though every dashboard uploaded fine. Generate a
+# small landing page at the root that links to each published scenario's report.
+publish_landing_index() {
+  if [ -z "${PUBLISHED_SCENARIOS}" ] || [ -z "${RESULTS_OUTPUT_S3_PATH}" ]; then
+    return 0
+  fi
+  landing="${JM_REPORTS}/index.html"
+  {
+    echo '<!DOCTYPE html>'
+    echo '<html lang="en"><head><meta charset="utf-8">'
+    echo '<title>bng-perf-tests report</title>'
+    echo '<style>body{font-family:sans-serif;margin:2rem;max-width:40rem}'
+    echo 'li{margin:.4rem 0}code{background:#f3f2f1;padding:.1rem .3rem}</style>'
+    echo '</head><body>'
+    echo "<h1>bng-perf-tests &mdash; ${ENVIRONMENT}</h1>"
+    echo "<p>run_id: <code>${RUN_ID}</code></p>"
+    echo '<h2>Scenario reports</h2><ul>'
+    for s in ${PUBLISHED_SCENARIOS}; do
+      echo "<li><a href=\"./${s}/index.html\">${s}</a></li>"
+    done
+    echo '</ul></body></html>'
+  } >"${landing}"
+  aws --endpoint-url=$S3_ENDPOINT s3 cp "${landing}" "${RESULTS_OUTPUT_S3_PATH}/index.html"
+  echo "Landing index published to ${RESULTS_OUTPUT_S3_PATH}/index.html"
 }
 
 # Non-zero if any scenario hit an infrastructure failure (missing file, mint
@@ -127,6 +157,9 @@ publish_results() {
 # encodes unshipped BMD-933 acceptance criteria and is red by design until the
 # backend fix lands.
 overall_status=0
+
+# Scenarios whose report reached S3, in run order — drives the root landing page.
+PUBLISHED_SCENARIOS=""
 
 for scenario in ${SCENARIOS}; do
   SCENARIOFILE=${JM_SCENARIOS}/${scenario}.jmx
@@ -196,5 +229,10 @@ for scenario in ${SCENARIOS}; do
 
   publish_results "${scenario}" "${REPORT_DIR}" "${REPORTFILE}" || overall_status=1
 done
+
+# Write the root index.html the CDP portal serves as the run's report. A run that
+# published no scenario report leaves it absent — the portal's "No report found"
+# is then the correct signal, not something to paper over.
+publish_landing_index
 
 exit ${overall_status}
