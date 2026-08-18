@@ -1,0 +1,234 @@
+// Mint a REAL Defra ID token from the cdp-defra-id-stub, headlessly, so the perf
+// suite can call the authenticated backend without a browser login and without
+// the backend trusting any special key. The backend simply verifies the stub's
+// JWT against the stub's JWKS (its OIDC_DISCOVERY_URL must point at the stub —
+// true on local and, once configured, on the CDP perf-test environment).
+//
+// This mirrors the harness's scripts/get-stub-token.mjs and follows the DEFRA
+// pattern used by trade-demo-perf-tests (a Node setup step in entrypoint.sh that
+// provisions the stub user via POST <stub>/API/register). Registration uses the
+// stub's JSON API with NO relationships, so the token carries no org context and
+// matches the relationship-less project the scenario seeds.
+//
+// Login is one GET: the stub links each user as `<authorize>&user=<email>`,
+// which 302s straight back to the redirect_uri with the code; we exchange it at
+// `<stub>/token` (PKCE). The user id is a deterministic UUID of the email, so
+// re-runs replace the one perf user in place rather than piling up registrations.
+//
+// Usage:  node scripts/get-stub-token.mjs   (id_token -> stdout, `sub=` -> stderr)
+import { createHash, randomBytes } from "node:crypto";
+
+// Progress goes to stderr; stdout carries ONLY the token so entrypoint.sh can
+// capture it with a command substitution.
+const note = (msg) => process.stderr.write(`${msg}\n`);
+const fail = (msg) => {
+  process.stderr.write(`✖ stub-token: ${msg}\n`);
+  process.exit(1);
+};
+
+// STUB_BASE_URL must include the stub's path prefix, e.g.
+// https://cdp-defra-id-stub.perf-test.cdp-int.defra.cloud/cdp-defra-id-stub
+const STUB = process.env.STUB_BASE_URL ?? "http://localhost:3200/cdp-defra-id-stub";
+const CLIENT_ID = process.env.OIDC_CLIENT_ID ?? "63983fc2-cfff-45bb-8ec2-959e21062b9a";
+const CLIENT_SECRET = process.env.OIDC_CLIENT_SECRET ?? "test_value";
+const REDIRECT_URI = process.env.OIDC_REDIRECT_URI ?? "http://localhost:3000/auth/callback";
+const SCOPE = process.env.OIDC_SCOPES ?? "openid profile email offline_access";
+const PERF_USER_EMAIL = process.env.PERF_USER_EMAIL ?? "bng-perf@bng.example.com";
+
+const MAX_REDIRECTS = 10;
+// The stub validates enrolment counts as POSITIVE integers (>= 1), even for a
+// user with no relationships.
+const MIN_ENROLMENT_COUNT = 1;
+const ERROR_SNIPPET_MAX = 200;
+
+const b64url = (buf) => Buffer.from(buf).toString("base64url");
+const rand = () => b64url(randomBytes(32));
+
+// ── deterministic UUID (same shape/technique as the harness minter) ─────────
+// Not RFC-4122 v5 (that mandates SHA-1, a weak hash) but the same shape:
+// SHA-256 truncated to 16 bytes with version/variant bits set, so the same name
+// always yields the same UUID-shaped id.
+const UUID_NAMESPACE = "1b671a64-40d5-491e-99b0-da01ff1f3341";
+const UUID_BYTE_LENGTH = 16;
+const UUID_VERSION_INDEX = 6;
+const UUID_VERSION_MASK = 0x0f;
+const UUID_VERSION_BITS = 0x50;
+const UUID_VARIANT_INDEX = 8;
+const UUID_VARIANT_MASK = 0x3f;
+const UUID_VARIANT_RFC = 0x80;
+const UUID_HYPHEN_SHAPE = /^(.{8})(.{4})(.{4})(.{4})(.{12})$/;
+
+function deterministicUuid(name) {
+  const namespace = Buffer.from(UUID_NAMESPACE.replaceAll("-", ""), "hex");
+  const digest = createHash("sha256").update(namespace).update(name).digest();
+  const id = digest.subarray(0, UUID_BYTE_LENGTH);
+  id[UUID_VERSION_INDEX] = (id[UUID_VERSION_INDEX] & UUID_VERSION_MASK) | UUID_VERSION_BITS;
+  id[UUID_VARIANT_INDEX] = (id[UUID_VARIANT_INDEX] & UUID_VARIANT_MASK) | UUID_VARIANT_RFC;
+  return id.toString("hex").replace(UUID_HYPHEN_SHAPE, "$1-$2-$3-$4-$5");
+}
+
+const PERF_USER_SUB = deterministicUuid(PERF_USER_EMAIL);
+
+// ── tiny cookie jar (resilient across Node versions) ────────────────────────
+function makeJar() {
+  const jar = new Map();
+  const store = (raw) => {
+    const [pair] = raw.split(";");
+    const eq = pair.indexOf("=");
+    if (eq > 0) {
+      jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+    }
+  };
+  return {
+    absorb(response) {
+      // getSetCookie() (undici) returns each Set-Cookie separately; fall back to
+      // the combined header on older runtimes.
+      const list = response.headers.getSetCookie?.();
+      if (list?.length) {
+        for (const raw of list) {
+          store(raw);
+        }
+        return;
+      }
+      const combined = response.headers.get("set-cookie");
+      if (combined) {
+        store(combined);
+      }
+    },
+    header() {
+      return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+    },
+  };
+}
+
+async function get(url, jar) {
+  const res = await fetch(url, {
+    method: "GET",
+    redirect: "manual",
+    headers: { cookie: jar.header() },
+  });
+  jar.absorb(res);
+  return res;
+}
+
+const abs = (location, base) => new URL(location, base).href;
+
+function buildAuthorizeUrl(challenge, state, nonce, email) {
+  const q = new URLSearchParams({
+    response_type: "code",
+    client_id: CLIENT_ID,
+    redirect_uri: REDIRECT_URI,
+    scope: SCOPE,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    state,
+    nonce,
+    user: email,
+  });
+  return `${STUB}/authorize?${q.toString()}`;
+}
+
+// 1. Register (or replace) the perf user via the stub's JSON API.
+async function registerPerfUser() {
+  note(`▸ stub-token: registering perf user ${PERF_USER_SUB} via ${STUB}/API/register`);
+  const res = await fetch(`${STUB}/API/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      userId: PERF_USER_SUB,
+      email: PERF_USER_EMAIL,
+      firstName: "BNG",
+      lastName: "Perf",
+      loa: "1",
+      aal: "1",
+      enrolmentCount: MIN_ENROLMENT_COUNT,
+      enrolmentRequestCount: MIN_ENROLMENT_COUNT,
+      relationships: [],
+    }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    fail(
+      `API/register returned HTTP ${res.status}: ${detail.slice(0, ERROR_SNIPPET_MAX)} — is the cdp-defra-id-stub reachable at ${STUB}?`,
+    );
+  }
+}
+
+// 2. Follow authorize -> callback (carrying cookies) until a hop lands back on
+// the redirect_uri carrying the authorization code.
+async function followToCode(startUrl, jar, expectedState) {
+  let url = startUrl;
+  for (let hop = 0; hop < MAX_REDIRECTS; hop += 1) {
+    const res = await get(url, jar);
+    const location = res.headers.get("location");
+    if (!location) {
+      fail(`Expected a redirect toward ${REDIRECT_URI} but got HTTP ${res.status} with no Location (hop ${hop}).`);
+    }
+    const next = abs(location, url);
+    if (next.startsWith(REDIRECT_URI)) {
+      const params = new URL(next).searchParams;
+      const code = params.get("code");
+      if (!code) {
+        fail(`Callback redirect had no code: ${next}`);
+      }
+      if (expectedState && params.get("state") !== expectedState) {
+        fail("State mismatch on the authorization callback.");
+      }
+      return code;
+    }
+    url = next;
+  }
+  fail(`Did not reach ${REDIRECT_URI} within ${MAX_REDIRECTS} redirects.`);
+  return null;
+}
+
+async function exchangeCode(code, verifier) {
+  const res = await fetch(`${STUB}/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: REDIRECT_URI,
+      code_verifier: verifier,
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+    }).toString(),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    fail(`Token endpoint returned HTTP ${res.status}: ${text.slice(0, ERROR_SNIPPET_MAX)}`);
+  }
+  return JSON.parse(text);
+}
+
+function decodeSub(idToken) {
+  const payload = idToken.split(".")[1];
+  const json = Buffer.from(payload, "base64url").toString("utf8");
+  return JSON.parse(json).sub;
+}
+
+async function main() {
+  const jar = makeJar();
+  const verifier = rand();
+  const challenge = b64url(createHash("sha256").update(verifier).digest());
+  const state = rand();
+  const nonce = rand();
+
+  await registerPerfUser();
+
+  note("▸ stub-token: logging in and exchanging the code");
+  const authorizeUrl = buildAuthorizeUrl(challenge, state, nonce, PERF_USER_EMAIL);
+  const code = await followToCode(authorizeUrl, jar, state);
+  const tokens = await exchangeCode(code, verifier);
+  const idToken = tokens.id_token ?? tokens.access_token;
+  if (!idToken) {
+    fail(`Token response had no id_token: ${JSON.stringify(tokens).slice(0, ERROR_SNIPPET_MAX)}`);
+  }
+
+  // sub -> stderr so it doesn't pollute stdout; token -> stdout for piping.
+  process.stderr.write(`sub=${decodeSub(idToken)}\n`);
+  process.stdout.write(idToken);
+}
+
+await main();
