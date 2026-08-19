@@ -90,9 +90,9 @@ Runtime properties (all overridable with -J..., wired from env vars in entrypoin
       </ThreadGroup>
       <hashTree>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="GET / (home page)">
-          <stringProp name="HTTPSampler.domain">${__P(frontendDomain, bng-metric-frontend.${__P(env)}.cdp-int.defra.cloud)}</stringProp>
-          <stringProp name="HTTPSampler.protocol">${__P(protocol, https)}</stringProp>
-          <stringProp name="HTTPSampler.port">${__P(frontendPort, ${__P(port, 443)})}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(frontendDomain,bng-metric-frontend.${__P(env)}.cdp-int.defra.cloud)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${__P(protocol,https)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(frontendPort,${__P(port,443)})}</stringProp>
           <stringProp name="HTTPSampler.path">/</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
@@ -130,9 +130,9 @@ Runtime properties (all overridable with -J..., wired from env vars in entrypoin
       </ThreadGroup>
       <hashTree>
         <ConfigTestElement guiclass="HttpDefaultsGui" testclass="ConfigTestElement" testname="HTTP Request Defaults">
-          <stringProp name="HTTPSampler.domain">${__P(backendDomain, bng-metric-backend.${__P(env)}.cdp-int.defra.cloud)}</stringProp>
-          <stringProp name="HTTPSampler.protocol">${__P(protocol, https)}</stringProp>
-          <stringProp name="HTTPSampler.port">${__P(backendPort, ${__P(port, 443)})}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(backendDomain,bng-metric-backend.${__P(env)}.cdp-int.defra.cloud)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${__P(protocol,https)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(backendPort,${__P(port,443)})}</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
           <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables">

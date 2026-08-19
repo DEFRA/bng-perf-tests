@@ -196,7 +196,10 @@ set -x
 # Publish the single dashboard at the ROOT of the results prefix — the object the
 # CDP portal serves as the report. Assertion failures do NOT gate: the list group
 # encodes unshipped BMD-933 acceptance criteria and is red by design until the
-# backend fix lands. Only an infrastructure failure (no report) gates here.
+# backend fix lands. This applies to the home-page group too — a down or slow
+# frontend shows red samples in the report but still exits 0, so the portal
+# dashboard, not the task exit code, is the source of truth. Only mint/seed and an
+# infrastructure failure to publish (no report) gate the run.
 if [ -z "${RESULTS_OUTPUT_S3_PATH}" ]; then
   echo "RESULTS_OUTPUT_S3_PATH is not set — skipping S3 publish"
   exit 0
@@ -205,15 +208,24 @@ if [ ! -f "${JM_REPORTS}/index.html" ]; then
   echo "ERROR: ${JM_REPORTS}/index.html not found — nothing to publish" >&2
   exit 1
 fi
-aws --endpoint-url=$S3_ENDPOINT s3 cp "${REPORTFILE}" "${RESULTS_OUTPUT_S3_PATH}/${REPORTFILE}"
-aws --endpoint-url=$S3_ENDPOINT s3 cp "${JM_REPORTS}" "${RESULTS_OUTPUT_S3_PATH}" --recursive
+# Both copies must succeed — publishing the report IS the point of the run, so a
+# failed upload has to fail the task. Without this the portal shows "No report
+# found" on a green task (the exact failure this addresses).
+if ! aws --endpoint-url=$S3_ENDPOINT s3 cp "${REPORTFILE}" "${RESULTS_OUTPUT_S3_PATH}/${REPORTFILE}"; then
+  echo "ERROR: failed to publish ${REPORTFILE} to ${RESULTS_OUTPUT_S3_PATH}" >&2
+  exit 1
+fi
+if ! aws --endpoint-url=$S3_ENDPOINT s3 cp "${JM_REPORTS}" "${RESULTS_OUTPUT_S3_PATH}" --recursive; then
+  echo "ERROR: failed to publish the report dashboard to ${RESULTS_OUTPUT_S3_PATH}" >&2
+  exit 1
+fi
 
 # End-of-run summary. xtrace off so it stands out as a clean block at the tail.
 set +x
 echo "──────────────────────────── bng-perf-tests summary ───────────────────────────────"
 echo "  run_id: ${RUN_ID:-<unset>} (environment ${ENVIRONMENT:-<unset>})"
 echo "  ${SCENARIO}: RAN — report published to ${RESULTS_OUTPUT_S3_PATH}"
-echo "  NOTE: the project-list group can still show red assertions in the report — that is"
-echo "        by design until the BMD-933 backend fix lands, and does not gate the run."
+echo "  NOTE: red assertions in the report (project-list by design until the BMD-933 backend"
+echo "        fix lands, or a slow/down frontend on the home-page group) do NOT gate the run."
 echo "────────────────────────────────────────────────────────────────────────────────────"
 set -x

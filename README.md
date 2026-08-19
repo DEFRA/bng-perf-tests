@@ -61,8 +61,10 @@ and passes once the projection + `limit`/`offset` pagination land**:
 The entrypoint targets `bng-metric-backend.<env>.cdp-int.defra.cloud` for this group
 automatically, so no override is needed on CDP. Point the two hosts independently with
 `FRONTEND_DOMAIN` / `BACKEND_DOMAIN` (and `FRONTEND_PORT` / `BACKEND_PORT` when the ports
-differ, e.g. a local stack). `SERVICE_ENDPOINT` still overrides the backend host for
-back-compat.
+differ, e.g. a local stack). `SERVICE_ENDPOINT` still overrides the **backend** host for
+back-compat — it no longer touches the frontend group. Do **not** set `SERVICE_ENDPOINT`
+to a frontend host: the list traffic would be sent to the frontend, which does not serve
+those endpoints. Leave it unset and use `FRONTEND_DOMAIN` / `BACKEND_DOMAIN` instead.
 
 ### Authenticating: a real cdp-defra-id-stub token
 
