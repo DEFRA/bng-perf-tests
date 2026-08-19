@@ -2,18 +2,23 @@
 #
 #   docker compose up --build
 #
-# The suite (home-page smoke test by default) is fired at an ALREADY-RUNNING
-# frontend on the host — normally the one the harness brings up (`npm run dev`
-# in bng-metric-harness, or Tilt). We do NOT stand the app up here: the frontend
-# needs the whole backend stack (Postgres, Redis, Defra ID stub, OIDC discovery)
-# to boot, which lives in bng-metric-backend's compose — duplicating it here
-# would just rot. The home page is public, so a reachable frontend is all the
-# smoke test needs.
+# The suite is a SINGLE plan with two thread groups: the public home page
+# (frontend) AND the authenticated project-list endpoints (backend). Before
+# JMeter runs it mints a cdp-defra-id-stub token and seeds baseline projects via
+# the backend API, so it needs the WHOLE stack reachable — frontend, backend and
+# the Defra ID stub — not just the frontend. We do NOT stand the apps up here:
+# they need Postgres, Redis, the Defra ID stub and OIDC discovery, which live in
+# bng-metric-backend's compose — duplicating that here would just rot. So point
+# this at an ALREADY-RUNNING stack, normally the one the harness brings up
+# (`npm run dev` in bng-metric-harness, or Tilt).
 #
-# By default it targets http://host.docker.internal:3000 (the host's frontend).
-# Override the target to hit a deployed CDP environment instead, e.g.
-#   SERVICE_ENDPOINT=bng-metric-frontend.dev.cdp-int.defra.cloud \
-#   SERVICE_PORT=443 SERVICE_URL_SCHEME=https ENVIRONMENT=dev \
+# By default it targets the host stack: frontend on host.docker.internal:3000,
+# backend on :3001, stub on :3200. Override to hit a deployed CDP environment,
+# e.g.
+#   FRONTEND_DOMAIN=bng-metric-frontend.dev.cdp-int.defra.cloud FRONTEND_PORT=443 \
+#   BACKEND_DOMAIN=bng-metric-backend.dev.cdp-int.defra.cloud BACKEND_PORT=443 \
+#   STUB_BASE_URL=https://cdp-defra-id-stub.dev.cdp-int.defra.cloud/cdp-defra-id-stub \
+#   SERVICE_URL_SCHEME=https ENVIRONMENT=dev \
 #   docker compose up --build
 #
 # LocalStack stands in for S3 so the entrypoint's results-publish step succeeds
@@ -36,10 +41,20 @@ services:
     environment:
       S3_ENDPOINT: 'http://localstack:4566'
       RESULTS_OUTPUT_S3_PATH: 's3://test-results'
-      TEST_SCENARIO: ${TEST_SCENARIO:-home-page}
+      TEST_SCENARIO: ${TEST_SCENARIO:-bng-perf}
       ENVIRONMENT: ${ENVIRONMENT:-local}
-      SERVICE_ENDPOINT: ${SERVICE_ENDPOINT:-host.docker.internal}
-      SERVICE_PORT: ${SERVICE_PORT:-3000}
+      # The plan hits BOTH the frontend (home page) and the authenticated backend
+      # (project list), and ALWAYS mints a stub token + seeds before JMeter runs —
+      # so a full reachable stack (frontend, backend, stub) is required; point each
+      # host explicitly below. There is no "frontend-only" mode: SEED_VIA_API=false
+      # skips only the seeding step, not the token mint or the backend thread group,
+      # so the run still fails fast if the stub or backend is unreachable. Target a
+      # deployed env via FRONTEND_DOMAIN / BACKEND_DOMAIN / STUB_BASE_URL.
+      FRONTEND_DOMAIN: ${FRONTEND_DOMAIN:-host.docker.internal}
+      BACKEND_DOMAIN: ${BACKEND_DOMAIN:-host.docker.internal}
+      FRONTEND_PORT: ${FRONTEND_PORT:-3000}
+      BACKEND_PORT: ${BACKEND_PORT:-3001}
+      STUB_BASE_URL: ${STUB_BASE_URL:-http://host.docker.internal:3200/cdp-defra-id-stub}
       SERVICE_URL_SCHEME: ${SERVICE_URL_SCHEME:-http}
     networks:
       - performance-tests

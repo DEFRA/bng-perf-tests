@@ -15,32 +15,29 @@ A successful build results in a Docker container that is capable of running your
 The performance test suites are designed to be run from the CDP Portal.
 The CDP Platform runs test suites in much the same way it runs any other service, it takes a docker image and runs it as an ECS task, automatically provisioning infrastructure as required.
 
-## Scenarios
+## Scenario
 
-Each `.jmx` under `scenarios/` is one suite. By default `entrypoint.sh` runs **every**
-scenario in `scenarios/` in one task, resolving each suite's target and auth from the
-scenario itself. Set `TEST_SCENARIO` to restrict the run to one suite (or a space- or
-comma-separated list), e.g. `TEST_SCENARIO=project-list-payload`. A requested name with
-no matching `.jmx` is skipped with a warning, and if none of the requested names resolve
-the task falls back to running every scenario — so a stale placeholder value on the CDP
-task (e.g. `TEST_SCENARIO=test`) never fails the whole run.
+The suite is a **single** JMeter plan — `scenarios/bng-perf.jmx` — so one run produces
+**one** report. It has two thread groups that run together in the one execution:
 
-| Scenario                | Targets               | Covers                                                                 |
-| ----------------------- | --------------------- | ---------------------------------------------------------------------- |
-| `home-page`             | `bng-metric-frontend` | Minimal smoke check against the public home page (`/`).                |
-| `project-list-payload`  | `bng-metric-backend`  | BMD-933 — the project list endpoints ship the whole project document.  |
+| Thread group             | Targets               | Covers                                                                 |
+| ------------------------ | --------------------- | ---------------------------------------------------------------------- |
+| `Home page`              | `bng-metric-frontend` | Minimal smoke check against the public home page (`/`), unauthenticated. |
+| `Project list endpoints` | `bng-metric-backend`  | BMD-933 — the project list endpoints ship the whole project document.  |
 
-Per scenario, the entrypoint picks the target and auth automatically: a scenario that
-reads the `bearerToken` property drives the **backend** API and gets a minted stub token;
-any other scenario targets the public **frontend** unauthenticated. The stub token is
-minted at most once per task and shared across the authenticated scenarios. Each
-scenario's JMeter report is published under its own `<results>/<scenario>/` prefix in S3
-so a multi-scenario run keeps every dashboard. A scenario's assertion failures do not
-fail the task (project-list-payload is red by design until the BMD-933 backend fix
-lands); only an infrastructure failure — a missing scenario, a failed token mint, or a
-scenario that produced no report — makes the task exit non-zero.
+Each group targets its own host (`frontendDomain` / `backendDomain`), and the Bearer
+header is scoped to the backend group only, so the home-page request is sent
+unauthenticated. The stub token is minted once and the backend data is seeded once,
+before JMeter starts. The single JMeter dashboard is published at the **root** of the
+results prefix — the object the CDP portal serves as the report — so no per-scenario
+landing page is needed. Assertion failures do **not** fail the task (the backend group
+is red by design until the BMD-933 fix lands); only an infrastructure failure — a
+missing plan, a failed token mint, a failed seed, or no report — makes the task exit
+non-zero. `TEST_SCENARIO=<name>` runs a different `scenarios/<name>.jmx` instead; an
+unknown name falls back to the default `bng-perf` plan, so a stale placeholder value on
+the CDP task (e.g. the base image's inherited `TEST_SCENARIO=test`) never fails the run.
 
-### `project-list-payload` (BMD-933)
+### Project list endpoints (BMD-933)
 
 Drives the two list endpoints — `GET /users/{userId}/projects` and `GET /projects` —
 under concurrency and asserts the BMD-933 acceptance criteria. Both handlers currently
@@ -61,10 +58,13 @@ and passes once the projection + `limit`/`offset` pagination land**:
 - **Duration Assertion** — guards against the multi-second event-loop stall a multi-MB
   synchronous `JSON.stringify` causes under load.
 
-The entrypoint targets `bng-metric-backend.<env>.cdp-int.defra.cloud` for this scenario
-automatically, so no `SERVICE_ENDPOINT` is needed on CDP. Override `SERVICE_ENDPOINT`
-(and `SERVICE_PORT` / `SERVICE_URL_SCHEME`) only for a one-off target such as a local
-backend.
+The entrypoint targets `bng-metric-backend.<env>.cdp-int.defra.cloud` for this group
+automatically, so no override is needed on CDP. Point the two hosts independently with
+`FRONTEND_DOMAIN` / `BACKEND_DOMAIN` (and `FRONTEND_PORT` / `BACKEND_PORT` when the ports
+differ, e.g. a local stack). `SERVICE_ENDPOINT` still overrides the **backend** host for
+back-compat — it no longer touches the frontend group. Do **not** set `SERVICE_ENDPOINT`
+to a frontend host: the list traffic would be sent to the frontend, which does not serve
+those endpoints. Leave it unset and use `FRONTEND_DOMAIN` / `BACKEND_DOMAIN` instead.
 
 ### Authenticating: a real cdp-defra-id-stub token
 
@@ -95,7 +95,11 @@ override any of the minting inputs if needed:
 | `LIST_SIZE_LIMIT_BYTES` | `262144`                                                       | Max allowed list response size (256 KB).            |
 | `LIST_MAX_LATENCY_MS`   | `2000`                                                         | Max allowed list response time.                     |
 | `LIST_LIMIT` / `LIST_OFFSET` | `50` / `0`                                                | Pagination params exercised against both endpoints. |
-| `LIST_THREADS` / `LIST_RAMP_SECONDS` / `LIST_LOOPS` | `10` / `10` / `20`                | Load profile.                                       |
+| `LIST_THREADS` / `LIST_RAMP_SECONDS` / `LIST_LOOPS` | `10` / `10` / `20`                | Backend (project-list) load profile.                |
+| `HOME_THREADS` / `HOME_RAMP_SECONDS` / `HOME_LOOPS` | `1` / `1` / `5`                   | Frontend (home-page) load profile.                  |
+| `MAX_RESPONSE_MS`       | `2000`                                                        | Home-page per-request time budget.                  |
+| `FRONTEND_DOMAIN` / `BACKEND_DOMAIN` | `*.<ENVIRONMENT>.cdp-int.defra.cloud`            | Per-service target hosts.                           |
+| `FRONTEND_PORT` / `BACKEND_PORT` | `SERVICE_PORT` (`443`)                              | Per-service ports; override when the hosts differ.  |
 
 ### Seed the data — owner must match the minted `sub`
 
@@ -155,14 +159,16 @@ equivalent for anywhere the DB is out of reach.
 > the stub token, seeds the project under its sub, runs JMeter, and prints a per-endpoint
 > pass/fail summary. The steps below are for running the container directly / on CDP.
 
-Run it locally against a backend on `localhost:3001` with:
+Run it locally against a full local stack (frontend on `3000`, backend on `3001`, stub on
+`3200`) with:
 
 ```sh
 docker build . -t bng-perf-tests
 docker run --rm --network host \
-  -e TEST_SCENARIO=project-list-payload \
   -e ENVIRONMENT=local \
-  -e SERVICE_ENDPOINT=localhost -e SERVICE_PORT=3001 -e SERVICE_URL_SCHEME=http \
+  -e FRONTEND_DOMAIN=localhost -e FRONTEND_PORT=3000 \
+  -e BACKEND_DOMAIN=localhost  -e BACKEND_PORT=3001 \
+  -e SERVICE_URL_SCHEME=http \
   -e STUB_BASE_URL=http://localhost:3200/cdp-defra-id-stub \
   -e RESULTS_OUTPUT_S3_PATH='s3://my-bucket' -e S3_ENDPOINT='http://host.docker.internal:4566' \
   -e AWS_ACCESS_KEY_ID='test' -e AWS_SECRET_ACCESS_KEY='test' -e AWS_REGION='eu-west-2' \
@@ -171,21 +177,23 @@ docker run --rm --network host \
 
 (The backend must be running with its OIDC pointed at that same stub — the default on a
 local `tilt up`. `USER_ID` is left to the minted `sub`; the backend trusts the token
-`sub`, not the path segment. Seed the project first so the assertions have data.)
+`sub`, not the path segment. Seeding runs automatically via the backend API; set
+`SEED_VIA_API=false` to skip it.)
 
 ## Running the suite locally
 
 You can run the suite locally with Docker Compose. Compose builds the JMeter image
-and fires the scenario at an **already-running frontend on your host**, then
-publishes the results to a LocalStack S3 bucket (and to `./reports` on your host).
+and fires the plan at an **already-running app on your host**, then publishes the
+results to a LocalStack S3 bucket (and to `./reports` on your host).
 
 ### 1. Start the app under test
 
-The compose stack does **not** stand the frontend up — the frontend needs the
-whole backend stack (Postgres, Redis, Defra ID stub, OIDC discovery), which lives
-in `bng-metric-backend`'s own compose. Bring the app up first so it is serving on
-port 3000. The home-page smoke test only needs the frontend reachable — `/` is a
-public page.
+The compose stack does **not** stand the app up. The single plan hits **both** the
+frontend (home page) and the authenticated backend (project list), and mints a stub
+token + seeds data against the backend — so it needs the whole stack (frontend,
+backend, Postgres, Redis, Defra ID stub, OIDC discovery), which lives in
+`bng-metric-backend`'s own compose. Bring it up first (e.g. `tilt up`) so the
+frontend serves on `3000`, the backend on `3001`, and the stub on `3200`.
 
 ### 2. Run the suite
 
@@ -196,28 +204,22 @@ docker compose up --build
 
 This brings up:
 
-* `development`: the container that runs the perf scenario (defaults to `home-page`)
+* `development`: the container that runs the plan (`scenarios/bng-perf.jmx`)
 * `localstack`: stands in for AWS S3 so the results-publish step succeeds
 
-By default it targets `http://host.docker.internal:3000` (your host's frontend).
-Once LocalStack is healthy the run starts automatically, and the container exits
-when the run finishes.
+By default it points the frontend group at `host.docker.internal:3000` and the backend
+group at `host.docker.internal:3001`. Once LocalStack is healthy the run starts
+automatically, and the container exits when the run finishes.
 
 ### 3. Point it somewhere else (optional)
 
-Every target knob is an overridable env var. To hit a deployed CDP environment
-instead of your local frontend:
+Every target knob is an overridable env var. To hit a deployed CDP environment:
 
 ```bash
-SERVICE_ENDPOINT=bng-metric-frontend.dev.cdp-int.defra.cloud \
-SERVICE_PORT=443 SERVICE_URL_SCHEME=https ENVIRONMENT=dev \
+ENVIRONMENT=dev SERVICE_URL_SCHEME=https \
+FRONTEND_DOMAIN=bng-metric-frontend.dev.cdp-int.defra.cloud FRONTEND_PORT=443 \
+BACKEND_DOMAIN=bng-metric-backend.dev.cdp-int.defra.cloud  BACKEND_PORT=443 \
 docker compose up --build
-```
-
-To run a different scenario file (`scenarios/<name>.jmx`):
-
-```bash
-TEST_SCENARIO=home-page docker compose up --build
 ```
 
 ### Notes
