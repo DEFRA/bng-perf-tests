@@ -33,9 +33,12 @@ else
   OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-https://bng-metric-frontend.${ENVIRONMENT}.cdp-int.defra.cloud/auth/callback}
 fi
 
-# The suite is a SINGLE JMeter plan with two thread groups — the public home page
-# (frontend) and the authenticated project-list endpoints (backend) — so one run
-# produces one report. TEST_SCENARIO overrides the plan name; an unknown name
+# The suite is a SINGLE JMeter plan holding every thread group — the public home
+# page, the authenticated project-list endpoints, and the upload size/concurrency
+# ramps with their background probe — so one run produces one report. That is what
+# the CDP portal serves: a single dashboard from the root of the results prefix,
+# which is why this is one plan rather than several run in sequence. Nothing needs
+# selecting; TEST_SCENARIO exists only as an escape hatch, and an unknown name
 # falls back to the default, so a stale placeholder (e.g. the base image's
 # inherited TEST_SCENARIO=test) can never fail the run.
 SCENARIO=${TEST_SCENARIO:-bng-perf}
@@ -61,6 +64,21 @@ BACKEND_PORT=${BACKEND_PORT:-${SERVICE_PORT}}
 # SEED_VIA_API=false to skip (e.g. when the target is already seeded).
 SEED_VIA_API=${SEED_VIA_API:-true}
 
+# The plan's upload phases need real uploads sitting in S3 before JMeter starts,
+# so they measure the validate call and not the uploader. Staging is therefore ON
+# by default. Set STAGE_UPLOADS=false to skip it — the upload thread groups then
+# validate an empty uploadId and report errors, so only do that when you care
+# solely about the home-page and project-list groups.
+STAGE_UPLOADS=${STAGE_UPLOADS:-true}
+# The backend hands back only the uploader PATH, so the uploader's own host has
+# to be resolved here. Mirrors the backend's own derivation from ENVIRONMENT.
+if [ "${ENVIRONMENT}" = "local" ]; then
+  CDP_UPLOADER_URL=${CDP_UPLOADER_URL:-http://localhost:7337}
+else
+  CDP_UPLOADER_URL=${CDP_UPLOADER_URL:-https://cdp-uploader.${ENVIRONMENT}.cdp-int.defra.cloud}
+fi
+PROJECTS_CSV=${PROJECTS_CSV:-${JM_HOME}/stage/projects.csv}
+
 # One-shot run-config banner. xtrace off so it reads as a clean block and so no
 # secret can ever be echoed here. Surfaces the resolved config up front — the
 # resolved scenario, the two targets, and OIDC_REDIRECT_URI (confirms the
@@ -76,6 +94,11 @@ echo "  backend target:      ${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${BACKEND
 echo "  stub base URL:       ${STUB_BASE_URL}"
 echo "  oidc redirect_uri:   ${OIDC_REDIRECT_URI}"
 echo "  seed via API:        ${SEED_VIA_API} (target ${SEED_PROJECT_COUNT:-5} project(s))"
+echo "  stage uploads:       ${STAGE_UPLOADS}"
+if [ "${STAGE_UPLOADS}" = "true" ]; then
+  echo "  cdp-uploader:        ${CDP_UPLOADER_URL}"
+  echo "  upload sizes:        ${UPLOAD_SIZES:-<defaults: everyday,busy,large,xlarge,extreme>}"
+fi
 echo "────────────────────────────────────────────────────────────────────────────────────"
 set -x
 
@@ -132,6 +155,49 @@ seed_via_api() {
   return 0
 }
 
+# Stage real uploads for the plan's upload phases: generate GeoPackages at each size,
+# push them through the CDP Uploader, wait for the scan, and create a pool of
+# projects to spread concurrent writes across. Emits `key=value` lines which
+# become -J properties, so the plan learns the staged uploadIds.
+stage_uploads() {
+  api_base_url="$1"
+  if [ "${STAGE_UPLOADS}" != "true" ]; then
+    return 0
+  fi
+  STAGE_OUT=$(mktemp)
+  # xtrace OFF so BEARER_TOKEN is never echoed into the CDP logs.
+  set +x
+  echo "▸ staging uploads via ${api_base_url} (uploader: ${CDP_UPLOADER_URL})"
+  # --no-warnings keeps node:sqlite's experimental notice out of the run log.
+  API_BASE_URL="${api_base_url}" \
+  BEARER_TOKEN="${BEARER_TOKEN}" \
+  CDP_UPLOADER_URL="${CDP_UPLOADER_URL}" \
+  STAGE_DIR="${JM_HOME}/stage" \
+  PROJECTS_CSV="${PROJECTS_CSV}" \
+  UPLOAD_SIZES="${UPLOAD_SIZES}" \
+  PROJECT_POOL_SIZE="${PROJECT_POOL_SIZE}" \
+  UPLOAD_READY_TIMEOUT_MS="${UPLOAD_READY_TIMEOUT_MS}" \
+    node --no-warnings "${JM_HOME}/scripts/stage-uploads.mjs" > "${STAGE_OUT}"
+  STAGE_STATUS=$?
+  set -x
+  if [ ${STAGE_STATUS} -ne 0 ]; then
+    echo "ERROR: staging uploads failed against ${api_base_url}" >&2
+    rm -f "${STAGE_OUT}"
+    return 1
+  fi
+  # Each emitted line is uploadId_<label>=<uuid> (plus parcels_/bytes_ for the
+  # record); turn them into JMeter properties the plan reads.
+  set +x
+  while IFS='=' read -r stage_key stage_value; do
+    if [ -n "${stage_key}" ]; then
+      add_prop "${stage_key}" "${stage_value}"
+    fi
+  done < "${STAGE_OUT}"
+  set -x
+  rm -f "${STAGE_OUT}"
+  return 0
+}
+
 add_prop() {
   # $1 = JMeter property name, $2 = value. Skips empty values so the .jmx default
   # wins rather than being overridden with an empty string.
@@ -178,6 +244,44 @@ add_prop listMaxLatencyMs "${LIST_MAX_LATENCY_MS}"
 add_prop limit "${LIST_LIMIT}"
 add_prop offset "${LIST_OFFSET}"
 
+# Upload load profile. The phase tunables are plain pass-throughs; the staged
+# uploadIds are added by stage_uploads itself, which is why it has to run AFTER
+# SCENARIO_PROPS is initialised — calling it earlier would have its properties
+# wiped by the reset above.
+add_prop projectsCsv "${PROJECTS_CSV}"
+add_prop everydayPhaseDurationSeconds "${EVERYDAY_PHASE_DURATION_SECONDS}"
+add_prop probeDelaySeconds "${PROBE_DELAY_SECONDS}"
+add_prop probeDurationSeconds "${PROBE_DURATION_SECONDS}"
+add_prop probeThreads "${PROBE_THREADS}"
+add_prop probeThinkMs "${PROBE_THINK_MS}"
+add_prop probeMaxLatencyMs "${PROBE_MAX_LATENCY_MS}"
+add_prop validateBudgetMs "${VALIDATE_BUDGET_MS}"
+add_prop everydayBudgetMs "${EVERYDAY_BUDGET_MS}"
+add_prop validateResponseTimeoutMs "${VALIDATE_RESPONSE_TIMEOUT_MS}"
+add_prop sizeRampDelaySeconds "${SIZE_RAMP_DELAY_SECONDS}"
+add_prop sizeRampDurationSeconds "${SIZE_RAMP_DURATION_SECONDS}"
+add_prop concStepDurationSeconds "${CONC_STEP_DURATION_SECONDS}"
+add_prop concDelay1 "${CONC_DELAY_1}"
+add_prop concDelay2 "${CONC_DELAY_2}"
+add_prop concDelay5 "${CONC_DELAY_5}"
+add_prop concDelay10 "${CONC_DELAY_10}"
+add_prop concDelay20 "${CONC_DELAY_20}"
+add_prop concUsers1 "${CONC_USERS_1}"
+add_prop concUsers2 "${CONC_USERS_2}"
+add_prop concUsers5 "${CONC_USERS_5}"
+add_prop concUsers10 "${CONC_USERS_10}"
+add_prop concUsers20 "${CONC_USERS_20}"
+add_prop burstThreads "${BURST_THREADS}"
+add_prop burstDelaySeconds "${BURST_DELAY_SECONDS}"
+add_prop burstDurationSeconds "${BURST_DURATION_SECONDS}"
+
+set -x
+if ! stage_uploads "${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${BACKEND_PORT}"; then
+  echo "ERROR: upload staging failed — cannot run ${SCENARIO}" >&2
+  exit 1
+fi
+set +x
+
 REPORTFILE=${NOW}-perftest-${SCENARIO}-report.csv
 LOGFILE=${JM_LOGS}/perftest-${SCENARIO}.log
 
@@ -192,6 +296,17 @@ jmeter -n -t ${SCENARIOFILE} -e -l "${REPORTFILE}" -o ${JM_REPORTS} -j ${LOGFILE
   -Jprotocol="${SERVICE_URL_SCHEME}" \
   ${SCENARIO_PROPS}
 set -x
+
+# Plain-English summary of the run, straight into the task log. The JMeter
+# dashboard has the detail; this has the shape — cost by file size, cost by
+# concurrency, and what an ordinary user saw while it happened. It is the thing
+# you paste into a ticket, so a failure to render it must not fail the run.
+if [ -f "${REPORTFILE}" ]; then
+  set +x
+  node "${JM_HOME}/scripts/summarise-run.mjs" "${REPORTFILE}" || \
+    echo "WARNING: could not summarise ${REPORTFILE}" >&2
+  set -x
+fi
 
 # Publish the single dashboard at the ROOT of the results prefix — the object the
 # CDP portal serves as the report. Assertion failures do NOT gate: the list group

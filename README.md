@@ -17,25 +17,49 @@ The CDP Platform runs test suites in much the same way it runs any other service
 
 ## Scenario
 
-The suite is a **single** JMeter plan — `scenarios/bng-perf.jmx` — so one run produces
-**one** report. It has two thread groups that run together in the one execution:
+Everything lives in a **single** JMeter plan — `scenarios/bng-perf.jmx` — so one run
+produces **one** report. Nothing needs selecting: a CDP task with no configuration runs
+the whole suite. That is not just convenience — the portal serves a single dashboard
+from the **root** of the results prefix, so one report per task is what it can show.
 
-| Thread group             | Targets               | Covers                                                                 |
-| ------------------------ | --------------------- | ---------------------------------------------------------------------- |
-| `Home page`              | `bng-metric-frontend` | Minimal smoke check against the public home page (`/`), unauthenticated. |
-| `Project list endpoints` | `bng-metric-backend`  | BMD-933 — the project list endpoints ship the whole project document.  |
+| Thread group                      | Targets               | Covers                                                                    |
+| --------------------------------- | --------------------- | ------------------------------------------------------------------------- |
+| `Home page`                       | `bng-metric-frontend` | Minimal smoke check against the public home page (`/`), unauthenticated.   |
+| `Project list endpoints`          | `bng-metric-backend`  | BMD-933 — the project list endpoints ship the whole project document.     |
+| `Everyday user (background probe)`| both                  | What an ordinary user experiences *while* the upload phases run.          |
+| `Size ramp`                       | `bng-metric-backend`  | Cost of validating one file, across five file sizes.                      |
+| `Concurrency 1/2/5/10/20 user(s)` | `bng-metric-backend`  | Cost as simultaneous uploads increase.                                    |
+| `Burst`                           | `bng-metric-backend`  | Large files back to back, no think time.                                   |
+
+The first two run **first and alone**, so their numbers are uncontended and mean what
+they did before. The upload phases follow, sequenced by wall clock, with the probe
+spanning them:
+
+```
+home + list |==|
+probe             |=================================================|
+size ramp           |=========|
+1 user                          |====|
+2 users                               |====|
+5 users                                     |====|
+10 users                                          |====|
+20 users                                                |====|
+burst                                                          |======|
+```
 
 Each group targets its own host (`frontendDomain` / `backendDomain`), and the Bearer
-header is scoped to the backend group only, so the home-page request is sent
-unauthenticated. The stub token is minted once and the backend data is seeded once,
-before JMeter starts. The single JMeter dashboard is published at the **root** of the
-results prefix — the object the CDP portal serves as the report — so no per-scenario
-landing page is needed. Assertion failures do **not** fail the task (the backend group
-is red by design until the BMD-933 fix lands); only an infrastructure failure — a
-missing plan, a failed token mint, a failed seed, or no report — makes the task exit
-non-zero. `TEST_SCENARIO=<name>` runs a different `scenarios/<name>.jmx` instead; an
-unknown name falls back to the default `bng-perf` plan, so a stale placeholder value on
-the CDP task (e.g. the base image's inherited `TEST_SCENARIO=test`) never fails the run.
+header is scoped to the backend groups only, so the home-page request is sent
+unauthenticated. The stub token is minted once, the backend data is seeded once, and
+the upload fixtures are staged once, all before JMeter starts. Assertion failures do
+**not** fail the task (the project-list group is red by design until the BMD-933 fix
+lands, and a red Duration Assertion beyond N users *is* the result); only an
+infrastructure failure — a missing plan, a failed token mint, a failed seed, a failed
+staging step, or no report — makes the task exit non-zero.
+
+`TEST_SCENARIO` is an escape hatch, not something a normal run sets: `TEST_SCENARIO=<name>`
+runs `scenarios/<name>.jmx` instead, and an unknown name falls back to `bng-perf`, so a
+stale placeholder on the CDP task (e.g. the base image's inherited `TEST_SCENARIO=test`)
+never fails the run.
 
 ### Project list endpoints (BMD-933)
 
@@ -65,6 +89,143 @@ differ, e.g. a local stack). `SERVICE_ENDPOINT` still overrides the **backend** 
 back-compat — it no longer touches the frontend group. Do **not** set `SERVICE_ENDPOINT`
 to a frontend host: the list traffic would be sent to the frontend, which does not serve
 those endpoints. Leave it unset and use `FRONTEND_DOMAIN` / `BACKEND_DOMAIN` instead.
+
+### Upload load profile
+
+The upload phases of the plan profile the **upload and validate** journey. They run
+after the home-page and project-list groups have finished, so neither set of numbers
+contaminates the other.
+
+They are built to answer four questions, in the order a PM asks them:
+
+| Question                                          | Where the answer is            |
+| ------------------------------------------------- | ------------------------------ |
+| What does an everyday upload cost?                | `validate everyday (1 user)`   |
+| At what file size does it become a problem?       | the rest of the size ramp      |
+| At what concurrency does it become a problem?     | `validate large @ N user(s)`   |
+| **What does an ordinary user experience meanwhile?** | `probe GET /projects`       |
+
+The last one is the point of the plan. Uploads getting slower under upload load
+is expected and mostly affects the person uploading. An unrelated project list
+going from 200 ms to a timeout is an availability story, and only a probe
+running **concurrently** with the load can show it. Every phase is scheduled, so
+they run in sequence while the probe spans the whole run:
+
+```
+probe      |=====================================================|
+size ramp    |=========|
+1 user                   |====|
+2 users                        |====|
+5 users                              |====|
+10 users                                   |====|
+20 users                                         |====|
+burst                                                   |======|
+```
+
+#### What it uploads, and why it is generated
+
+`scripts/make-gpkg.mjs` builds a valid baseline GeoPackage of any size by
+driving [`bng-library`](https://github.com/DEFRA/bng-library) — the same
+generator the harness CLI and the digital prototype use. Two calls: `generateOne`
+writes a synthetic file (baseline *and* proposed columns), then
+`deriveBaselineFromSynthetic` clears the proposed columns to leave a baseline
+document. The file has to be *valid* — one rejected at the format gate exits
+before the expensive work and would measure nothing.
+
+Using the shared library rather than a bespoke generator is what makes the
+numbers trustworthy. An earlier hand-rolled version here emitted a uniform grid
+of identical single-layer parcels, and measured **slower** than a realistic file
+of the same parcel count (40 ms vs 27 ms to parse 2 000 parcels) because its
+mostly-NULL attribute columns hit the validator's slow property-lookup path far
+more often than a real file does. The library also owns the scope invariant: its
+random draws come from `IN_SCOPE_HABITATS` / `IN_SCOPE_HEDGE_TYPES` /
+`IN_SCOPE_RIVER_TYPES`, so a fixture can never carry the High / V.High
+distinctiveness the service rejects at upload.
+
+Generation is seeded on the parcel count, so a rerun of the same size produces a
+byte-identical file — two runs that disagree are a change in the service, not a
+change in the fixture.
+
+Files are generated per run rather than committed, so any size can be asked for
+via `UPLOAD_SIZES` without putting tens of MB of binaries in git. The cost is
+that `bng-library` and its `better-sqlite3` / `xlsx` peers are baked into the
+image at build time (see the `Dockerfile`); the CDP task pulls a finished image
+and needs no access to GitHub or the npm registry.
+
+For scale: real BNG files in the reference corpus top out around **80 parcels /
+124 KB**, which is what `everyday` reproduces. The larger steps exist to find
+where the service stops coping, not because anyone submits them today.
+
+| Label      | Parcels | File size | Generation |
+| ---------- | ------- | --------- | ---------- |
+| `everyday` | 80      | 140 KB    | 0.02 s     |
+| `busy`     | 800     | 704 KB    | 0.08 s     |
+| `large`    | 5 000   | 4.0 MB    | 1.6 s      |
+| `xlarge`   | 12 000  | 9.3 MB    | 9.0 s      |
+| `extreme`  | 20 000  | 15.5 MB   | 30 s       |
+
+Generation is **super-linear** in parcel count — `partitionPolygon` in
+`bng-library` re-sorts the whole parcel list on every split, so 4× the parcels
+costs roughly 19× the time. 60 000 parcels does not finish in a usable time,
+which is why the ramp stops at 20 000. That is not a loss of coverage: at
+15.5 MB, 20 000 parcels already produces a larger file than the previous
+top-of-ramp did, so the service sees the same stress and only the staging cost
+changes. Staging the whole ramp costs ~42 s of generation before JMeter starts;
+each step's time is logged so a slow-looking start is identifiable as setup.
+
+#### Staging: what is measured and what is not
+
+`scripts/stage-uploads.mjs` runs before JMeter and does the parts that are *not*
+the service's work — initiate, POST the file to the CDP Uploader, wait for the
+virus scan. JMeter then measures only `POST /baseline/validate/{uploadId}`.
+Driving a multipart upload and a polling loop from JMeter would add noise and
+complexity for nothing, and the uploader's scan time is not ours to report on.
+
+Staging also creates a **pool of projects**. Validation only runs the full
+pipeline — extract, size, persist — when a `projectId` is supplied; without one
+it stops after the geometry checks and would under-measure the real cost. And
+concurrent uploads to the *same* project serialise on a row lock and 409, so
+each concurrent thread needs its own.
+
+Staging is on automatically for this plan and off for every other; override with
+`STAGE_UPLOADS`.
+
+#### Reading the result
+
+The task log ends with a plain-English summary (`scripts/summarise-run.mjs`) —
+cost by file size, cost by concurrency, and what the probe saw during each
+phase. That is the part to paste into a ticket; the JMeter dashboard has the
+detail behind it.
+
+Assertion failures do **not** gate the task, and a red Duration Assertion beyond
+N users *is* the result rather than a failure. One assertion is different:
+`Fixture actually validates` checks the response contains `"valid":true`. If
+that goes red the staged file is not passing validation and every number in the
+run is meaningless.
+
+| Env var                          | Default                                        | Purpose                                                        |
+| -------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
+| `TEST_SCENARIO`                  | `bng-perf`                                     | Escape hatch only — leave unset to run the whole suite.         |
+| `UPLOAD_SIZES`                   | `everyday:80,busy:800,large:5000,xlarge:12000,extreme:20000` | `label:parcels` pairs to stage.                    |
+| `STAGE_UPLOADS`                  | `true` for this plan                           | Skip staging (e.g. reusing already-staged uploads).             |
+| `CDP_UPLOADER_URL`               | `https://cdp-uploader.<ENVIRONMENT>.cdp-int.defra.cloud` | The uploader to POST staged files to.                 |
+| `PROJECT_POOL_SIZE`              | `40`                                           | Projects to spread concurrent writes across. Keep ≥ max threads. |
+| `UPLOAD_READY_TIMEOUT_MS`        | `180000`                                       | How long to wait for the uploader's scan. Large files are slow. |
+| `PROBE_DURATION_SECONDS`         | `700`                                          | How long the background probe runs. Must span every phase.      |
+| `PROBE_THINK_MS` / `PROBE_MAX_LATENCY_MS` | `2000` / `2000`                       | Probe pacing, and the latency it is judged against.             |
+| `VALIDATE_BUDGET_MS`             | `30000`                                        | Latency budget for a validate call under load.                  |
+| `EVERYDAY_BUDGET_MS`             | `5000`                                         | Tighter budget for the everyday-sized file.                     |
+| `VALIDATE_RESPONSE_TIMEOUT_MS`   | `120000`                                       | Socket timeout — above this a sample is an error, not a slow success. |
+| `SIZE_RAMP_DELAY_SECONDS` / `SIZE_RAMP_DURATION_SECONDS` | `5` / `180`            | Size-ramp phase window.                                         |
+| `CONC_STEP_DURATION_SECONDS`     | `60`                                           | How long each concurrency step runs.                            |
+| `CONC_DELAY_{1,2,5,10,20}`       | `200/270/340/410/480`                          | When each concurrency step starts.                              |
+| `CONC_USERS_{1,2,5,10,20}`       | `1/2/5/10/20`                                  | Threads at each step.                                           |
+| `BURST_THREADS` / `BURST_DELAY_SECONDS` / `BURST_DURATION_SECONDS` | `10` / `555` / `120` | Back-to-back phase.                              |
+
+> **Sequencing is by wall clock.** The phase delays are absolute seconds from
+> the start of the run, so if you lengthen one phase you must push the later
+> delays out too — otherwise phases overlap and the concurrency figures stop
+> meaning what they say.
 
 ### Authenticating: a real cdp-defra-id-stub token
 
