@@ -36,9 +36,10 @@ COPY user.properties .
 
 ENV S3_ENDPOINT=https://s3.eu-west-2.amazonaws.com
 # The base image (defradigital/cdp-perf-test-docker) bakes in ENV TEST_SCENARIO=test
-# for its own sample test.jmx, which we do not ship. Clear it so an unset value means
-# "run the default scenarios/bng-perf.jmx plan"; set TEST_SCENARIO=<name> on the CDP
-# task to point at a different scenarios/<name>.jmx.
+# for its own sample test.jmx, which we do not ship. Clear it so an unset value runs
+# scenarios/bng-perf.jmx — the one plan, holding every thread group. A CDP task needs
+# no configuration to run the whole suite; TEST_SCENARIO=<name> stays available as an
+# escape hatch for a scenarios/<name>.jmx added later.
 ENV TEST_SCENARIO=""
 
 ENTRYPOINT [ "./entrypoint.sh" ]

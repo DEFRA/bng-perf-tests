@@ -17,27 +17,49 @@ The CDP Platform runs test suites in much the same way it runs any other service
 
 ## Scenario
 
-The default suite is a **single** JMeter plan — `scenarios/bng-perf.jmx` — so one run
-produces **one** report. A second plan, `scenarios/bng-upload-perf.jmx`, profiles the
-upload journey and is run as its own task with `TEST_SCENARIO=bng-upload-perf` (see
-[Upload load profile](#upload-load-profile-test_scenariobng-upload-perf)). It has two thread groups that run together in the one execution:
+Everything lives in a **single** JMeter plan — `scenarios/bng-perf.jmx` — so one run
+produces **one** report. Nothing needs selecting: a CDP task with no configuration runs
+the whole suite. That is not just convenience — the portal serves a single dashboard
+from the **root** of the results prefix, so one report per task is what it can show.
 
-| Thread group             | Targets               | Covers                                                                 |
-| ------------------------ | --------------------- | ---------------------------------------------------------------------- |
-| `Home page`              | `bng-metric-frontend` | Minimal smoke check against the public home page (`/`), unauthenticated. |
-| `Project list endpoints` | `bng-metric-backend`  | BMD-933 — the project list endpoints ship the whole project document.  |
+| Thread group                      | Targets               | Covers                                                                    |
+| --------------------------------- | --------------------- | ------------------------------------------------------------------------- |
+| `Home page`                       | `bng-metric-frontend` | Minimal smoke check against the public home page (`/`), unauthenticated.   |
+| `Project list endpoints`          | `bng-metric-backend`  | BMD-933 — the project list endpoints ship the whole project document.     |
+| `Everyday user (background probe)`| both                  | What an ordinary user experiences *while* the upload phases run.          |
+| `Size ramp`                       | `bng-metric-backend`  | Cost of validating one file, across five file sizes.                      |
+| `Concurrency 1/2/5/10/20 user(s)` | `bng-metric-backend`  | Cost as simultaneous uploads increase.                                    |
+| `Burst`                           | `bng-metric-backend`  | Large files back to back, no think time.                                   |
+
+The first two run **first and alone**, so their numbers are uncontended and mean what
+they did before. The upload phases follow, sequenced by wall clock, with the probe
+spanning them:
+
+```
+home + list |==|
+probe             |=================================================|
+size ramp           |=========|
+1 user                          |====|
+2 users                               |====|
+5 users                                     |====|
+10 users                                          |====|
+20 users                                                |====|
+burst                                                          |======|
+```
 
 Each group targets its own host (`frontendDomain` / `backendDomain`), and the Bearer
-header is scoped to the backend group only, so the home-page request is sent
-unauthenticated. The stub token is minted once and the backend data is seeded once,
-before JMeter starts. The single JMeter dashboard is published at the **root** of the
-results prefix — the object the CDP portal serves as the report — so no per-scenario
-landing page is needed. Assertion failures do **not** fail the task (the backend group
-is red by design until the BMD-933 fix lands); only an infrastructure failure — a
-missing plan, a failed token mint, a failed seed, or no report — makes the task exit
-non-zero. `TEST_SCENARIO=<name>` runs a different `scenarios/<name>.jmx` instead; an
-unknown name falls back to the default `bng-perf` plan, so a stale placeholder value on
-the CDP task (e.g. the base image's inherited `TEST_SCENARIO=test`) never fails the run.
+header is scoped to the backend groups only, so the home-page request is sent
+unauthenticated. The stub token is minted once, the backend data is seeded once, and
+the upload fixtures are staged once, all before JMeter starts. Assertion failures do
+**not** fail the task (the project-list group is red by design until the BMD-933 fix
+lands, and a red Duration Assertion beyond N users *is* the result); only an
+infrastructure failure — a missing plan, a failed token mint, a failed seed, a failed
+staging step, or no report — makes the task exit non-zero.
+
+`TEST_SCENARIO` is an escape hatch, not something a normal run sets: `TEST_SCENARIO=<name>`
+runs `scenarios/<name>.jmx` instead, and an unknown name falls back to `bng-perf`, so a
+stale placeholder on the CDP task (e.g. the base image's inherited `TEST_SCENARIO=test`)
+never fails the run.
 
 ### Project list endpoints (BMD-933)
 
@@ -68,14 +90,13 @@ back-compat — it no longer touches the frontend group. Do **not** set `SERVICE
 to a frontend host: the list traffic would be sent to the frontend, which does not serve
 those endpoints. Leave it unset and use `FRONTEND_DOMAIN` / `BACKEND_DOMAIN` instead.
 
-### Upload load profile (`TEST_SCENARIO=bng-upload-perf`)
+### Upload load profile
 
-A second plan, `scenarios/bng-upload-perf.jmx`, profiles the **upload and
-validate** journey rather than the list endpoints. It is a separate plan, and so
-a separate CDP task and a separate report, because mixing heavy uploads into the
-everyday suite would muddy both.
+The upload phases of the plan profile the **upload and validate** journey. They run
+after the home-page and project-list groups have finished, so neither set of numbers
+contaminates the other.
 
-It is built to answer four questions, in the order a PM asks them:
+They are built to answer four questions, in the order a PM asks them:
 
 | Question                                          | Where the answer is            |
 | ------------------------------------------------- | ------------------------------ |
@@ -184,7 +205,7 @@ run is meaningless.
 
 | Env var                          | Default                                        | Purpose                                                        |
 | -------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
-| `TEST_SCENARIO`                  | `bng-perf`                                     | Set `bng-upload-perf` to run this plan.                         |
+| `TEST_SCENARIO`                  | `bng-perf`                                     | Escape hatch only — leave unset to run the whole suite.         |
 | `UPLOAD_SIZES`                   | `everyday:80,busy:800,large:5000,xlarge:12000,extreme:20000` | `label:parcels` pairs to stage.                    |
 | `STAGE_UPLOADS`                  | `true` for this plan                           | Skip staging (e.g. reusing already-staged uploads).             |
 | `CDP_UPLOADER_URL`               | `https://cdp-uploader.<ENVIRONMENT>.cdp-int.defra.cloud` | The uploader to POST staged files to.                 |

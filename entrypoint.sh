@@ -33,9 +33,12 @@ else
   OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-https://bng-metric-frontend.${ENVIRONMENT}.cdp-int.defra.cloud/auth/callback}
 fi
 
-# The suite is a SINGLE JMeter plan with two thread groups — the public home page
-# (frontend) and the authenticated project-list endpoints (backend) — so one run
-# produces one report. TEST_SCENARIO overrides the plan name; an unknown name
+# The suite is a SINGLE JMeter plan holding every thread group — the public home
+# page, the authenticated project-list endpoints, and the upload size/concurrency
+# ramps with their background probe — so one run produces one report. That is what
+# the CDP portal serves: a single dashboard from the root of the results prefix,
+# which is why this is one plan rather than several run in sequence. Nothing needs
+# selecting; TEST_SCENARIO exists only as an escape hatch, and an unknown name
 # falls back to the default, so a stale placeholder (e.g. the base image's
 # inherited TEST_SCENARIO=test) can never fail the run.
 SCENARIO=${TEST_SCENARIO:-bng-perf}
@@ -61,14 +64,12 @@ BACKEND_PORT=${BACKEND_PORT:-${SERVICE_PORT}}
 # SEED_VIA_API=false to skip (e.g. when the target is already seeded).
 SEED_VIA_API=${SEED_VIA_API:-true}
 
-# The upload plan needs real uploads sitting in S3 before JMeter starts, so it
-# measures the validate call and not the uploader. Staging is therefore ON for
-# that plan and OFF for every other, unless STAGE_UPLOADS says otherwise.
-if [ "${SCENARIO}" = "bng-upload-perf" ]; then
-  STAGE_UPLOADS=${STAGE_UPLOADS:-true}
-else
-  STAGE_UPLOADS=${STAGE_UPLOADS:-false}
-fi
+# The plan's upload phases need real uploads sitting in S3 before JMeter starts,
+# so they measure the validate call and not the uploader. Staging is therefore ON
+# by default. Set STAGE_UPLOADS=false to skip it — the upload thread groups then
+# validate an empty uploadId and report errors, so only do that when you care
+# solely about the home-page and project-list groups.
+STAGE_UPLOADS=${STAGE_UPLOADS:-true}
 # The backend hands back only the uploader PATH, so the uploader's own host has
 # to be resolved here. Mirrors the backend's own derivation from ENVIRONMENT.
 if [ "${ENVIRONMENT}" = "local" ]; then
@@ -154,7 +155,7 @@ seed_via_api() {
   return 0
 }
 
-# Stage real uploads for the upload plan: generate GeoPackages at each size,
+# Stage real uploads for the plan's upload phases: generate GeoPackages at each size,
 # push them through the CDP Uploader, wait for the scan, and create a pool of
 # projects to spread concurrent writes across. Emits `key=value` lines which
 # become -J properties, so the plan learns the staged uploadIds.
@@ -248,6 +249,8 @@ add_prop offset "${LIST_OFFSET}"
 # SCENARIO_PROPS is initialised — calling it earlier would have its properties
 # wiped by the reset above.
 add_prop projectsCsv "${PROJECTS_CSV}"
+add_prop everydayPhaseDurationSeconds "${EVERYDAY_PHASE_DURATION_SECONDS}"
+add_prop probeDelaySeconds "${PROBE_DELAY_SECONDS}"
 add_prop probeDurationSeconds "${PROBE_DURATION_SECONDS}"
 add_prop probeThreads "${PROBE_THREADS}"
 add_prop probeThinkMs "${PROBE_THINK_MS}"
