@@ -103,28 +103,54 @@ burst                                                   |======|
 
 #### What it uploads, and why it is generated
 
-`scripts/make-gpkg.mjs` builds a valid baseline GeoPackage of any size: the two
-required layers, real British National Grid coordinates inside England (the
-geometry checks test containment), habitat parcels on a non-overlapping grid
-inside the red line, and an in-scope habitat type. It has to be *valid* — a file
-rejected at the format gate exits before the expensive work and would measure
-nothing.
+`scripts/make-gpkg.mjs` builds a valid baseline GeoPackage of any size by
+driving [`bng-library`](https://github.com/DEFRA/bng-library) — the same
+generator the harness CLI and the digital prototype use. Two calls: `generateOne`
+writes a synthetic file (baseline *and* proposed columns), then
+`deriveBaselineFromSynthetic` clears the proposed columns to leave a baseline
+document. The file has to be *valid* — one rejected at the format gate exits
+before the expensive work and would measure nothing.
 
-Generated rather than committed so any size can be asked for without putting
-tens of MB of binaries in git. It uses `node:sqlite`, so no native module is
-needed; the base image ships Node 22, which has it built in.
+Using the shared library rather than a bespoke generator is what makes the
+numbers trustworthy. An earlier hand-rolled version here emitted a uniform grid
+of identical single-layer parcels, and measured **slower** than a realistic file
+of the same parcel count (40 ms vs 27 ms to parse 2 000 parcels) because its
+mostly-NULL attribute columns hit the validator's slow property-lookup path far
+more often than a real file does. The library also owns the scope invariant: its
+random draws come from `IN_SCOPE_HABITATS` / `IN_SCOPE_HEDGE_TYPES` /
+`IN_SCOPE_RIVER_TYPES`, so a fixture can never carry the High / V.High
+distinctiveness the service rejects at upload.
+
+Generation is seeded on the parcel count, so a rerun of the same size produces a
+byte-identical file — two runs that disagree are a change in the service, not a
+change in the fixture.
+
+Files are generated per run rather than committed, so any size can be asked for
+via `UPLOAD_SIZES` without putting tens of MB of binaries in git. The cost is
+that `bng-library` and its `better-sqlite3` / `xlsx` peers are baked into the
+image at build time (see the `Dockerfile`); the CDP task pulls a finished image
+and needs no access to GitHub or the npm registry.
 
 For scale: real BNG files in the reference corpus top out around **80 parcels /
 124 KB**, which is what `everyday` reproduces. The larger steps exist to find
 where the service stops coping, not because anyone submits them today.
 
-| Label      | Parcels | Roughly |
-| ---------- | ------- | ------- |
-| `everyday` | 80      | ~70 KB  |
-| `busy`     | 800     | ~250 KB |
-| `large`    | 5 000   | ~1.5 MB |
-| `xlarge`   | 20 000  | ~6 MB   |
-| `extreme`  | 60 000  | ~17 MB  |
+| Label      | Parcels | File size | Generation |
+| ---------- | ------- | --------- | ---------- |
+| `everyday` | 80      | 140 KB    | 0.02 s     |
+| `busy`     | 800     | 704 KB    | 0.08 s     |
+| `large`    | 5 000   | 4.0 MB    | 1.6 s      |
+| `xlarge`   | 12 000  | 9.3 MB    | 9.0 s      |
+| `extreme`  | 20 000  | 15.5 MB   | 30 s       |
+
+Generation is **super-linear** in parcel count — `partitionPolygon` in
+`bng-library` re-sorts the whole parcel list on every split, so 4× the parcels
+costs roughly 19× the time. 60 000 parcels does not finish in a usable time,
+which is why the ramp stops at 20 000. That is not a loss of coverage: at
+15.5 MB, 20 000 parcels already produces a larger file than the previous
+top-of-ramp did, so the service sees the same stress and only the staging cost
+changes. Staging the whole ramp costs ~42 s of generation before JMeter starts;
+each step's time is logged so a slow-looking start is identifiable as setup.
 
 #### Staging: what is measured and what is not
 
@@ -159,7 +185,7 @@ run is meaningless.
 | Env var                          | Default                                        | Purpose                                                        |
 | -------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
 | `TEST_SCENARIO`                  | `bng-perf`                                     | Set `bng-upload-perf` to run this plan.                         |
-| `UPLOAD_SIZES`                   | `everyday:80,busy:800,large:5000,xlarge:20000,extreme:60000` | `label:parcels` pairs to stage.                    |
+| `UPLOAD_SIZES`                   | `everyday:80,busy:800,large:5000,xlarge:12000,extreme:20000` | `label:parcels` pairs to stage.                    |
 | `STAGE_UPLOADS`                  | `true` for this plan                           | Skip staging (e.g. reusing already-staged uploads).             |
 | `CDP_UPLOADER_URL`               | `https://cdp-uploader.<ENVIRONMENT>.cdp-int.defra.cloud` | The uploader to POST staged files to.                 |
 | `PROJECT_POOL_SIZE`              | `40`                                           | Projects to spread concurrent writes across. Keep ≥ max threads. |

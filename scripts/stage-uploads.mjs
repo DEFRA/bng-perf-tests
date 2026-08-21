@@ -47,8 +47,15 @@ const HTTP_BAD_REQUEST = 400
  * corpus top out around 80 parcels / 124 KB, so `everyday` is what a user
  * actually submits; the larger steps are there to find where the service stops
  * coping, not because anyone uploads them today.
+ *
+ * The top of the ramp is 20 000 parcels / ~15 MB rather than anything larger
+ * because bng-library's `partitionPolygon` re-sorts the whole parcel list on
+ * every split, so generation is roughly quadratic: 5 000 parcels takes ~1.6 s,
+ * 20 000 takes ~30 s, and 60 000 does not finish in a usable time. 20 000
+ * already reaches the byte size a bigger parcel count was reaching before, so
+ * the stress is unchanged — only the staging cost is.
  */
-const DEFAULT_SIZES = 'everyday:80,busy:800,large:5000,xlarge:20000,extreme:60000'
+const DEFAULT_SIZES = 'everyday:80,busy:800,large:5000,xlarge:12000,extreme:20000'
 
 function parseSizes(spec) {
   return spec
@@ -159,9 +166,13 @@ async function waitForReady(uploadId) {
 
 async function stageOneSize({ label, parcels }) {
   const filePath = join(STAGE_DIR, `baseline-${label}.gpkg`)
-  const { bytes } = makeGeoPackage(filePath, parcels)
+  const { bytes, generationMs } = makeGeoPackage(filePath, parcels)
+  // Generation time is logged because it is super-linear in parcel count and
+  // is pure setup cost — a task that looks slow to start is usually the top of
+  // the size ramp being built, not the service being slow.
   process.stderr.write(
-    `▸ ${label}: ${parcels} parcels, ${(bytes / 1024).toFixed(0)} KB — uploading\n`
+    `▸ ${label}: ${parcels} parcels, ${(bytes / 1024).toFixed(0)} KB ` +
+      `(generated in ${(generationMs / 1000).toFixed(1)}s) — uploading\n`
   )
 
   const { uploadId, uploadUrl } = await initiateUpload()
