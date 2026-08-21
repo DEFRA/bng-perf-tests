@@ -7,19 +7,11 @@
  * same generator the harness CLI and the digital prototype use, so the fixtures
  * a perf run measures are the fixtures the team already generates by hand.
  *
- * That matters for the numbers, not just for tidiness. An earlier bespoke
- * generator here emitted a uniform grid of identical single-layer parcels,
- * which measured *slower* than a realistic file of the same parcel count
- * (40 ms vs 27 ms to parse 2 000 parcels) because its mostly-NULL attribute
- * columns hit the validator's slow property-lookup path far more often than a
- * real file does. A perf suite whose fixtures are unrepresentative produces
- * numbers nobody can act on.
- *
  * The library also owns the scope invariant: its random draws come from
  * `IN_SCOPE_HABITATS` / `IN_SCOPE_HEDGE_TYPES` / `IN_SCOPE_RIVER_TYPES`, so a
  * generated file can never carry the High / V.High distinctiveness the service
- * rejects. Pinning a habitat here — as the bespoke version did — would silently
- * drift the day that rule changed.
+ * rejects. Pinning a habitat here by hand would silently drift the day that
+ * rule changed.
  *
  * Two calls, mirroring `bng-metric-harness`'s `gen-gpkg`:
  *   generateOne                 — writes a *synthetic* file (baseline + proposed)
