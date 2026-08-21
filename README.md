@@ -17,8 +17,10 @@ The CDP Platform runs test suites in much the same way it runs any other service
 
 ## Scenario
 
-The suite is a **single** JMeter plan — `scenarios/bng-perf.jmx` — so one run produces
-**one** report. It has two thread groups that run together in the one execution:
+The default suite is a **single** JMeter plan — `scenarios/bng-perf.jmx` — so one run
+produces **one** report. A second plan, `scenarios/bng-upload-perf.jmx`, profiles the
+upload journey and is run as its own task with `TEST_SCENARIO=bng-upload-perf` (see
+[Upload load profile](#upload-load-profile-test_scenariobng-upload-perf)). It has two thread groups that run together in the one execution:
 
 | Thread group             | Targets               | Covers                                                                 |
 | ------------------------ | --------------------- | ---------------------------------------------------------------------- |
@@ -65,6 +67,118 @@ differ, e.g. a local stack). `SERVICE_ENDPOINT` still overrides the **backend** 
 back-compat — it no longer touches the frontend group. Do **not** set `SERVICE_ENDPOINT`
 to a frontend host: the list traffic would be sent to the frontend, which does not serve
 those endpoints. Leave it unset and use `FRONTEND_DOMAIN` / `BACKEND_DOMAIN` instead.
+
+### Upload load profile (`TEST_SCENARIO=bng-upload-perf`)
+
+A second plan, `scenarios/bng-upload-perf.jmx`, profiles the **upload and
+validate** journey rather than the list endpoints. It is a separate plan, and so
+a separate CDP task and a separate report, because mixing heavy uploads into the
+everyday suite would muddy both.
+
+It is built to answer four questions, in the order a PM asks them:
+
+| Question                                          | Where the answer is            |
+| ------------------------------------------------- | ------------------------------ |
+| What does an everyday upload cost?                | `validate everyday (1 user)`   |
+| At what file size does it become a problem?       | the rest of the size ramp      |
+| At what concurrency does it become a problem?     | `validate large @ N user(s)`   |
+| **What does an ordinary user experience meanwhile?** | `probe GET /projects`       |
+
+The last one is the point of the plan. Uploads getting slower under upload load
+is expected and mostly affects the person uploading. An unrelated project list
+going from 200 ms to a timeout is an availability story, and only a probe
+running **concurrently** with the load can show it. Every phase is scheduled, so
+they run in sequence while the probe spans the whole run:
+
+```
+probe      |=====================================================|
+size ramp    |=========|
+1 user                   |====|
+2 users                        |====|
+5 users                              |====|
+10 users                                   |====|
+20 users                                         |====|
+burst                                                   |======|
+```
+
+#### What it uploads, and why it is generated
+
+`scripts/make-gpkg.mjs` builds a valid baseline GeoPackage of any size: the two
+required layers, real British National Grid coordinates inside England (the
+geometry checks test containment), habitat parcels on a non-overlapping grid
+inside the red line, and an in-scope habitat type. It has to be *valid* — a file
+rejected at the format gate exits before the expensive work and would measure
+nothing.
+
+Generated rather than committed so any size can be asked for without putting
+tens of MB of binaries in git. It uses `node:sqlite`, so no native module is
+needed; the base image ships Node 22, which has it built in.
+
+For scale: real BNG files in the reference corpus top out around **80 parcels /
+124 KB**, which is what `everyday` reproduces. The larger steps exist to find
+where the service stops coping, not because anyone submits them today.
+
+| Label      | Parcels | Roughly |
+| ---------- | ------- | ------- |
+| `everyday` | 80      | ~70 KB  |
+| `busy`     | 800     | ~250 KB |
+| `large`    | 5 000   | ~1.5 MB |
+| `xlarge`   | 20 000  | ~6 MB   |
+| `extreme`  | 60 000  | ~17 MB  |
+
+#### Staging: what is measured and what is not
+
+`scripts/stage-uploads.mjs` runs before JMeter and does the parts that are *not*
+the service's work — initiate, POST the file to the CDP Uploader, wait for the
+virus scan. JMeter then measures only `POST /baseline/validate/{uploadId}`.
+Driving a multipart upload and a polling loop from JMeter would add noise and
+complexity for nothing, and the uploader's scan time is not ours to report on.
+
+Staging also creates a **pool of projects**. Validation only runs the full
+pipeline — extract, size, persist — when a `projectId` is supplied; without one
+it stops after the geometry checks and would under-measure the real cost. And
+concurrent uploads to the *same* project serialise on a row lock and 409, so
+each concurrent thread needs its own.
+
+Staging is on automatically for this plan and off for every other; override with
+`STAGE_UPLOADS`.
+
+#### Reading the result
+
+The task log ends with a plain-English summary (`scripts/summarise-run.mjs`) —
+cost by file size, cost by concurrency, and what the probe saw during each
+phase. That is the part to paste into a ticket; the JMeter dashboard has the
+detail behind it.
+
+Assertion failures do **not** gate the task, and a red Duration Assertion beyond
+N users *is* the result rather than a failure. One assertion is different:
+`Fixture actually validates` checks the response contains `"valid":true`. If
+that goes red the staged file is not passing validation and every number in the
+run is meaningless.
+
+| Env var                          | Default                                        | Purpose                                                        |
+| -------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
+| `TEST_SCENARIO`                  | `bng-perf`                                     | Set `bng-upload-perf` to run this plan.                         |
+| `UPLOAD_SIZES`                   | `everyday:80,busy:800,large:5000,xlarge:20000,extreme:60000` | `label:parcels` pairs to stage.                    |
+| `STAGE_UPLOADS`                  | `true` for this plan                           | Skip staging (e.g. reusing already-staged uploads).             |
+| `CDP_UPLOADER_URL`               | `https://cdp-uploader.<ENVIRONMENT>.cdp-int.defra.cloud` | The uploader to POST staged files to.                 |
+| `PROJECT_POOL_SIZE`              | `40`                                           | Projects to spread concurrent writes across. Keep ≥ max threads. |
+| `UPLOAD_READY_TIMEOUT_MS`        | `180000`                                       | How long to wait for the uploader's scan. Large files are slow. |
+| `PROBE_DURATION_SECONDS`         | `700`                                          | How long the background probe runs. Must span every phase.      |
+| `PROBE_THINK_MS` / `PROBE_MAX_LATENCY_MS` | `2000` / `2000`                       | Probe pacing, and the latency it is judged against.             |
+| `VALIDATE_BUDGET_MS`             | `30000`                                        | Latency budget for a validate call under load.                  |
+| `EVERYDAY_BUDGET_MS`             | `5000`                                         | Tighter budget for the everyday-sized file.                     |
+| `VALIDATE_RESPONSE_TIMEOUT_MS`   | `120000`                                       | Socket timeout — above this a sample is an error, not a slow success. |
+| `SIZE_RAMP_DELAY_SECONDS` / `SIZE_RAMP_DURATION_SECONDS` | `5` / `180`            | Size-ramp phase window.                                         |
+| `CONC_STEP_DURATION_SECONDS`     | `60`                                           | How long each concurrency step runs.                            |
+| `CONC_DELAY_{1,2,5,10,20}`       | `200/270/340/410/480`                          | When each concurrency step starts.                              |
+| `CONC_USERS_{1,2,5,10,20}`       | `1/2/5/10/20`                                  | Threads at each step.                                           |
+| `BURST_THREADS` / `BURST_DELAY_SECONDS` / `BURST_DURATION_SECONDS` | `10` / `555` / `120` | Back-to-back phase.                              |
+
+> **Sequencing is by wall clock.** The phase delays are absolute seconds from
+> the start of the run, so if you lengthen one phase you must push the later
+> delays out too — otherwise phases overlap and the concurrency figures stop
+> meaning what they say.
 
 ### Authenticating: a real cdp-defra-id-stub token
 
