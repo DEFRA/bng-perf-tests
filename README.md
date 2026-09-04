@@ -721,6 +721,7 @@ run is meaningless.
 | `PERF_PROFILE`                   | `standard`                                     | The only profile. See [The profile](#the-profile--how-long-a-run-takes). |
 | `PERF_DUMP_SCHEDULE`             | unset                                          | `true` prints the resolved schedule and exits, touching nothing. |
 | `WINDOW_<step>`                  | _derived_                                      | Override one step's window, e.g. `WINDOW_journey_normal_10=30`. The timeline re-derives around it. |
+| `USERS_<step>`                   | _derived_                                      | Override one step's thread count, e.g. `USERS_journey_normal_10=0`. **To skip a step, zero this AND its window** — a window of 0 with users still set makes JMeter refuse the thread group rather than skip it. |
 | `PHASE_GAP_SECONDS`              | _derived per phase_                            | Set it and every phase gets that uniform gap instead of its own drain time. |
 | `MIX_THREADS`                    | `8`                                            | Threads on the mixed workload.                                  |
 | `MIX_{LIST,FETCH,EDIT,VALIDATE}_PERCENT` | `40/25/25/10`                          | The mix, as percent of iterations. Warns if they do not total 100. |
