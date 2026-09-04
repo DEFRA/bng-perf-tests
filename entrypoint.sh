@@ -289,14 +289,12 @@ for phase_key in ${PROFILE_PHASE_LIST}; do
   # re-derives around it — set durations, not delays, as everywhere else here.
   eval "phase_window=\${WINDOW_${phase_key}:-\${phase_window}}"
 
-  # USERS_<key> is the other half of that escape hatch, and skipping a step
-  # needs both. JMeter does not treat a thread group of N users for 0 seconds
-  # as "skip"; it REFUSES to start it — "Invalid duration 0 set in Thread
-  # Group" — so zeroing the window alone suppresses the step by way of an
-  # error. The step does not run either way, but the log fills with failures
-  # that are not failures, and a thread group that fails to start for a real
-  # reason is then invisible among them. A caller zeroing both gets the same
-  # silent skip a phase omitted from the profile already gets.
+  # To skip a step, zero this AND its window. Zeroing the window alone does not
+  # skip it: JMeter refuses to start a thread group of N users for 0 seconds
+  # ("Invalid duration 0 set in Thread Group"). The step stays off either way,
+  # but each one then logs an error that is not a failure — and a thread group
+  # that failed for a real reason is lost among them. Zero both and the step is
+  # as quiet as one the profile never listed.
   eval "phase_users=\${USERS_${phase_key}:-\${phase_users}}"
 
   eval "PHASE_USERS_${phase_key}=${phase_users}"
