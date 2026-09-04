@@ -51,10 +51,21 @@ UPLOAD LOAD, which answers three questions a PM asks in this order:
      The staircases above replay a PRE-STAGED upload, so they measure the
      service&apos;s validate cost in isolation. The journey groups instead drive a
      real upload per iteration — initiate, multipart POST to the CDP Uploader,
-     validate — at 1/2/5 concurrent users, so the uploader and its virus scan
-     are inside the measurement. The backend&apos;s validate route waits for the
-     scan itself, so no client-side polling is needed; the &quot;validate+scan&quot; leg
-     carries that wait, as a frontend user would experience it.
+     poll until the scan finishes, validate — at 1/2/5 concurrent users, so the
+     uploader and its virus scan are inside the measurement.
+
+     The poll is not optional, and assuming otherwise is what this plan used to
+     get wrong. The backend&apos;s validate route does wait for the upload to be
+     ready, but only for UPLOAD_READY_TIMEOUT_MS — three seconds, sized as a
+     safety net on the assumption the caller already polled, which is what the
+     frontend does. Calling validate straight after the upload turned that net
+     into a hard three-second deadline on virus scanning: 318 of 637 failures in
+     a full run were 504s on this leg, every one of them at ~3040 ms, failing
+     100% at EVERY concurrency step including a single user. It was measuring
+     the scan, not the service.
+
+     So the wait now sits in its own &quot;wait for scan&quot; sampler, exactly where the
+     frontend puts it, and the validate leg measures validation.
 
 and, running alongside all of it, one that matters more than any of them:
 
@@ -1020,6 +1031,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 1 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 1 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -1214,6 +1254,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 2 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 2 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
@@ -1410,6 +1479,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 3 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 3 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -1604,6 +1702,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 4 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 4 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
@@ -1800,6 +1927,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 5 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 5 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -1994,6 +2150,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 6 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 6 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
@@ -2190,6 +2375,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 7 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 7 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -2384,6 +2598,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 8 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 8 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
@@ -2580,6 +2823,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 9 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 9 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -2774,6 +3046,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 10 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 10 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
@@ -2970,6 +3271,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 1 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 1 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -3164,6 +3494,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 2 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 2 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
@@ -3360,6 +3719,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 5 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 5 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -3554,6 +3942,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 10 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 10 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
@@ -3750,6 +4167,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 1 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 1 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -3944,6 +4390,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 2 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 2 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
@@ -4140,6 +4615,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 3 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 3 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -4334,6 +4838,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 5 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 5 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
@@ -4530,6 +5063,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 8 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 8 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -4724,6 +5286,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 10 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 10 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
@@ -4920,6 +5511,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 1 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 1 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -5115,6 +5735,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 2 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 2 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -5309,6 +5958,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || ("${uploadReadyStatus}" != "ready" &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 5 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 5 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
