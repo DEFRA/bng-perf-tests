@@ -377,10 +377,18 @@ function revalidateStep(step, defaults) {
 /**
  * One upload-journey step: N threads each driving a REAL upload end to end.
  *
- * Three legs on one thread — initiate, multipart POST to the uploader, validate
- * — so the uploader and its virus scan are inside the measurement. There is no
- * client-side scan poll because the backend's validate route waits for the scan
- * itself (waitForUploadReady), so the validate leg carries that wait.
+ * Four legs on one thread — initiate, multipart POST to the uploader, poll until
+ * the scan finishes, validate — so the uploader and its virus scan are inside
+ * the measurement.
+ *
+ * The poll is not optional, and assuming otherwise is what this generator used
+ * to get wrong. The backend's validate route does wait for the upload to be
+ * ready, but only for UPLOAD_READY_TIMEOUT_MS — three seconds, sized as a
+ * safety net on the assumption the caller already polled, which is what the
+ * frontend does. Calling validate straight after the upload turned that net
+ * into a hard three-second deadline on virus scanning, and the validate leg
+ * returned 504s regardless of load — including at a single user. It was
+ * measuring the scanner, not the service.
  */
 function journeyStep(step, defaults) {
   const key = stepKey(step)
@@ -395,9 +403,11 @@ function journeyStep(step, defaults) {
         'initiate, multipart POST to the CDP Uploader, then validate, as one closed\n' +
         'loop per user. Every iteration is a real new upload, so the uploader and\n' +
         'its scanner are inside the number.\n\n' +
-        'No client-side poll: the backend\'s validate route waits for the scan\n' +
-        'itself, so the validate leg carries the same wall clock a frontend user\n' +
-        'experiences, without a polling loop\'s noise in the report.'
+        'The scan wait sits in its own leg, polling /upload/{id}/status exactly as\n' +
+        'the frontend does. The backend\'s validate route waits too, but only for\n' +
+        'UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,\n' +
+        'not a scan budget. Calling validate straight after the upload turned it\n' +
+        'into a hard three-second deadline on scanning and 504d regardless of load.'
     }),
     `${IND}<hashTree>`,
     backendDefaults(BODY),
@@ -445,6 +455,7 @@ ${BODY}  <boolProp name="IfController.useExpression">true</boolProp>
 ${BODY}</IfController>
 ${BODY}<hashTree>`,
     journeyUploadLeg(step, suffix),
+    journeyWaitForScanLeg(suffix),
     journeyValidateLeg(step, suffix),
     `${BODY}</hashTree>`,
     `${IND}</hashTree>`
@@ -481,6 +492,55 @@ ${UPLOAD_LEG}  </elementProp>
 ${UPLOAD_LEG}</HTTPSamplerProxy>
 ${UPLOAD_LEG}<hashTree>
 ${statusIs(UPLOAD_CHILD, '302')}
+${UPLOAD_LEG}</hashTree>`
+}
+
+/**
+ * The scan wait, as its own leg.
+ *
+ * JMeter has no do-while, and a plain "not ready" condition would be wrong on a
+ * thread's SECOND iteration: uploadReadyStatus would still hold "ready" from the
+ * first upload, the loop would not run, and validate would fire immediately
+ * against a fresh upload — the exact bug this leg exists to fix, reappearing on
+ * every iteration but the first. Forcing the first pass with the controller's
+ * own index re-reads the status for the upload actually in hand.
+ *
+ * The 240-pass ceiling, at one second a poll, caps a stuck upload at four
+ * minutes rather than forever; the interval matches waitForUploadReady's own
+ * cadence, because a tighter one invents load the run did not ask for.
+ */
+function journeyWaitForScanLeg(suffix) {
+  const cond =
+    '${__jexl3(${__jm__waitForScan__idx} == 0 || ' +
+    '("${uploadReadyStatus}" != "ready" && ${__jm__waitForScan__idx} < 240),)}'
+  return `${UPLOAD_LEG}<WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+${UPLOAD_LEG}  <stringProp name="WhileController.condition">${xml(cond)}</stringProp>
+${UPLOAD_LEG}</WhileController>
+${UPLOAD_LEG}<hashTree>
+${UPLOAD_CHILD}<HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${xml(`journey ${suffix}: wait for scan`)}">
+${UPLOAD_CHILD}  <stringProp name="HTTPSampler.path">/upload/\${journeyUploadId}/status</stringProp>
+${UPLOAD_CHILD}  <stringProp name="HTTPSampler.method">GET</stringProp>
+${UPLOAD_CHILD}  <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+${UPLOAD_CHILD}  <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+${UPLOAD_CHILD}  <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+${UPLOAD_CHILD}  <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+${UPLOAD_CHILD}  <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+${UPLOAD_CHILD}    <collectionProp name="Arguments.arguments"/>
+${UPLOAD_CHILD}  </elementProp>
+${UPLOAD_CHILD}</HTTPSamplerProxy>
+${UPLOAD_CHILD}<hashTree>
+${UPLOAD_CHILD}  <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+${UPLOAD_CHILD}    <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+${UPLOAD_CHILD}    <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+${UPLOAD_CHILD}    <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+${UPLOAD_CHILD}    <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+${UPLOAD_CHILD}  </JSONPostProcessor>
+${UPLOAD_CHILD}  <hashTree/>
+${UPLOAD_CHILD}  <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+${UPLOAD_CHILD}    <stringProp name="ConstantTimer.delay">1000</stringProp>
+${UPLOAD_CHILD}  </ConstantTimer>
+${UPLOAD_CHILD}  <hashTree/>
+${UPLOAD_CHILD}</hashTree>
 ${UPLOAD_LEG}</hashTree>`
 }
 

@@ -7,9 +7,9 @@
       "bytes": 143360
     },
     {
-      "label": "busy",
+      "label": "medium",
       "parcels": 800,
-      "file": "baseline-busy.gpkg",
+      "file": "baseline-medium.gpkg",
       "bytes": 720896
     },
     {

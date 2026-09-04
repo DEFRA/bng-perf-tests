@@ -204,7 +204,7 @@ PROBE_BASELINE_SECONDS=${PROBE_BASELINE_SECONDS:-25}
 # phase, which is why summarise-run.mjs reports how much of the window the ramp
 # actually used. Tighten them from that number after the first real run.
 SIZE_ALLOWANCE_NORMAL_SECONDS=${SIZE_ALLOWANCE_NORMAL_SECONDS:-2}
-SIZE_ALLOWANCE_BUSY_SECONDS=${SIZE_ALLOWANCE_BUSY_SECONDS:-4}
+SIZE_ALLOWANCE_MEDIUM_SECONDS=${SIZE_ALLOWANCE_MEDIUM_SECONDS:-4}
 SIZE_ALLOWANCE_LARGE_SECONDS=${SIZE_ALLOWANCE_LARGE_SECONDS:-12}
 SIZE_ALLOWANCE_XLARGE_SECONDS=${SIZE_ALLOWANCE_XLARGE_SECONDS:-26}
 
@@ -217,12 +217,12 @@ SIZE_ALLOWANCE_XLARGE_SECONDS=${SIZE_ALLOWANCE_XLARGE_SECONDS:-26}
 SIZE_RAMP_THREADS=${SIZE_RAMP_THREADS:-1}
 SIZE_RAMP_LOOPS=${SIZE_RAMP_LOOPS:-1}
 SIZE_LOOPS_NORMAL=${SIZE_LOOPS_NORMAL:-$(profile_value SIZE_LOOPS normal 20)}
-SIZE_LOOPS_BUSY=${SIZE_LOOPS_BUSY:-$(profile_value SIZE_LOOPS busy 8)}
+SIZE_LOOPS_MEDIUM=${SIZE_LOOPS_MEDIUM:-$(profile_value SIZE_LOOPS medium 8)}
 SIZE_LOOPS_LARGE=${SIZE_LOOPS_LARGE:-$(profile_value SIZE_LOOPS large 3)}
 SIZE_LOOPS_XLARGE=${SIZE_LOOPS_XLARGE:-$(profile_value SIZE_LOOPS xlarge 2)}
 
 SIZE_RAMP_PASS_SECONDS=$(( SIZE_LOOPS_NORMAL * SIZE_ALLOWANCE_NORMAL_SECONDS \
-  + SIZE_LOOPS_BUSY * SIZE_ALLOWANCE_BUSY_SECONDS \
+  + SIZE_LOOPS_MEDIUM * SIZE_ALLOWANCE_MEDIUM_SECONDS \
   + SIZE_LOOPS_LARGE * SIZE_ALLOWANCE_LARGE_SECONDS \
   + SIZE_LOOPS_XLARGE * SIZE_ALLOWANCE_XLARGE_SECONDS ))
 # Threads run the pass concurrently, so they do not lengthen it; loops repeat it.
@@ -496,14 +496,14 @@ else
 fi
 echo "  profile:             ${PERF_PROFILE} — ${LADDER_PHASE_COUNT} ladder phase(s), ${BANNER_BUDGET}"
 echo "                       ${LADDER_SCHEDULE_SUMMARY}"
-echo "  size-ramp window:    ${SIZE_RAMP_DURATION_SECONDS}s for ${SIZE_RAMP_LOOPS} pass(es) of ${SIZE_LOOPS_NORMAL}/${SIZE_LOOPS_BUSY}/${SIZE_LOOPS_LARGE}/${SIZE_LOOPS_XLARGE} (normal/busy/large/xlarge)"
-echo "                       derived from ${SIZE_ALLOWANCE_NORMAL_SECONDS}/${SIZE_ALLOWANCE_BUSY_SECONDS}/${SIZE_ALLOWANCE_LARGE_SECONDS}/${SIZE_ALLOWANCE_XLARGE_SECONDS}s allowed per validate — the summary reports how much was used"
+echo "  size-ramp window:    ${SIZE_RAMP_DURATION_SECONDS}s for ${SIZE_RAMP_LOOPS} pass(es) of ${SIZE_LOOPS_NORMAL}/${SIZE_LOOPS_MEDIUM}/${SIZE_LOOPS_LARGE}/${SIZE_LOOPS_XLARGE} (normal/medium/large/xlarge)"
+echo "                       derived from ${SIZE_ALLOWANCE_NORMAL_SECONDS}/${SIZE_ALLOWANCE_MEDIUM_SECONDS}/${SIZE_ALLOWANCE_LARGE_SECONDS}/${SIZE_ALLOWANCE_XLARGE_SECONDS}s allowed per validate — the summary reports how much was used"
 echo "  stage uploads:       ${STAGE_UPLOADS}"
 echo "  prepared pools:      ${PREPARED_SIZES:-<none>} (projects pre-loaded with a baseline, for the edit/fetch/post-intervention groups)"
 echo "  post-intervention:   ${PI_SIZES:-<none>}"
 if [ "${STAGE_UPLOADS}" = "true" ]; then
   echo "  cdp-uploader:        ${CDP_UPLOADER_URL}"
-  echo "  upload sizes:        ${UPLOAD_SIZES:-<defaults: normal,busy,large,xlarge>}"
+  echo "  upload sizes:        ${UPLOAD_SIZES:-<defaults: normal,medium,large,xlarge>}"
 fi
 echo "────────────────────────────────────────────────────────────────────────────────────"
 set -x
@@ -700,7 +700,7 @@ disable_unstaged_phases() {
       eval "FETCH_LOOPS_${upload_label}=0"
     done
     SIZE_LOOPS_NORMAL=0
-    SIZE_LOOPS_BUSY=0
+    SIZE_LOOPS_MEDIUM=0
     SIZE_LOOPS_LARGE=0
     SIZE_LOOPS_XLARGE=0
     return 0
@@ -712,7 +712,7 @@ disable_unstaged_phases() {
       echo "▸ no staged upload for '${upload_label}' — skipping its size-ramp step and revalidate ladder" >&2
       case "${upload_label}" in
         normal) SIZE_LOOPS_NORMAL=0 ;;
-        busy) SIZE_LOOPS_BUSY=0 ;;
+        medium) SIZE_LOOPS_MEDIUM=0 ;;
         large) SIZE_LOOPS_LARGE=0 ;;
         xlarge) SIZE_LOOPS_XLARGE=0 ;;
       esac
@@ -898,7 +898,7 @@ derive_ladder_delays
 add_prop probeDurationSeconds "${PROBE_DURATION_SECONDS}"
 
 add_prop sizeLoopsNormal "${SIZE_LOOPS_NORMAL}"
-add_prop sizeLoopsBusy "${SIZE_LOOPS_BUSY}"
+add_prop sizeLoopsBusy "${SIZE_LOOPS_MEDIUM}"
 add_prop sizeLoopsLarge "${SIZE_LOOPS_LARGE}"
 add_prop sizeLoopsXlarge "${SIZE_LOOPS_XLARGE}"
 
@@ -979,7 +979,7 @@ set -x
 if [ -f "${REPORTFILE}" ]; then
   set +x
   SIZE_RAMP_EXPECTED="normal:$(( SIZE_LOOPS_NORMAL * SIZE_RAMP_LOOPS * SIZE_RAMP_THREADS ))"
-  SIZE_RAMP_EXPECTED="${SIZE_RAMP_EXPECTED},busy:$(( SIZE_LOOPS_BUSY * SIZE_RAMP_LOOPS * SIZE_RAMP_THREADS ))"
+  SIZE_RAMP_EXPECTED="${SIZE_RAMP_EXPECTED},medium:$(( SIZE_LOOPS_MEDIUM * SIZE_RAMP_LOOPS * SIZE_RAMP_THREADS ))"
   SIZE_RAMP_EXPECTED="${SIZE_RAMP_EXPECTED},large:$(( SIZE_LOOPS_LARGE * SIZE_RAMP_LOOPS * SIZE_RAMP_THREADS ))"
   SIZE_RAMP_EXPECTED="${SIZE_RAMP_EXPECTED},xlarge:$(( SIZE_LOOPS_XLARGE * SIZE_RAMP_LOOPS * SIZE_RAMP_THREADS ))"
   SIZE_RAMP_EXPECTED="${SIZE_RAMP_EXPECTED}" \

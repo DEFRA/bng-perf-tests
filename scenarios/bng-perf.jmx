@@ -34,7 +34,7 @@ UPLOAD LOAD, which answers three questions a PM asks in this order:
   3. What does a normal upload cost?       -&gt; "Size ramp", `normal` label
   4. When does a BIG file become a problem?   -&gt; "Size ramp", the larger labels
 
-     The ramp is ONE user doing a fixed, WEIGHTED pass: 20 normal, 8 busy, 3 large,
+     The ramp is ONE user doing a fixed, WEIGHTED pass: 20 normal, 8 medium, 3 large,
      2 xlarge (sizeLoops*). One user is the point — these numbers only mean
      "the cost of validating this file" if nothing else is hitting the service, which
      rules out giving each size its own thread. But an unweighted pass makes every size
@@ -51,10 +51,21 @@ UPLOAD LOAD, which answers three questions a PM asks in this order:
      The staircases above replay a PRE-STAGED upload, so they measure the
      service&apos;s validate cost in isolation. The journey groups instead drive a
      real upload per iteration — initiate, multipart POST to the CDP Uploader,
-     validate — at 1/2/5 concurrent users, so the uploader and its virus scan
-     are inside the measurement. The backend&apos;s validate route waits for the
-     scan itself, so no client-side polling is needed; the &quot;validate+scan&quot; leg
-     carries that wait, as a frontend user would experience it.
+     poll until the scan finishes, validate — at 1/2/5 concurrent users, so the
+     uploader and its virus scan are inside the measurement.
+
+     The poll is not optional, and assuming otherwise is what this plan used to
+     get wrong. The backend&apos;s validate route does wait for the upload to be
+     ready, but only for UPLOAD_READY_TIMEOUT_MS — three seconds, sized as a
+     safety net on the assumption the caller already polled, which is what the
+     frontend does. Calling validate straight after the upload turned that net
+     into a hard three-second deadline on virus scanning: 318 of 637 failures in
+     a full run were 504s on this leg, every one of them at ~3040 ms, failing
+     100% at EVERY concurrency step including a single user. It was measuring
+     the scan, not the service.
+
+     So the wait now sits in its own &quot;wait for scan&quot; sampler, exactly where the
+     frontend puts it, and the validate leg measures validation.
 
 and, running alongside all of it, one that matters more than any of them:
 
@@ -247,9 +258,9 @@ vars and the delays move with it; override a delay and you own the arithmetic.</
             <stringProp name="Argument.value">${__P(journeyFile_normal,/opt/perftest/fixtures/baseline-normal.gpkg)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
-          <elementProp name="journeyFile_busy" elementType="Argument">
-            <stringProp name="Argument.name">journeyFile_busy</stringProp>
-            <stringProp name="Argument.value">${__P(journeyFile_busy,/opt/perftest/fixtures/baseline-busy.gpkg)}</stringProp>
+          <elementProp name="journeyFile_medium" elementType="Argument">
+            <stringProp name="Argument.name">journeyFile_medium</stringProp>
+            <stringProp name="Argument.value">${__P(journeyFile_medium,/opt/perftest/fixtures/baseline-medium.gpkg)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
           <elementProp name="journeyFile_large" elementType="Argument">
@@ -731,13 +742,13 @@ vars and the delays move with it; override a delay and you own the arithmetic.</
             <hashTree/>
           </hashTree>
         </hashTree>
-        <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="busy x N">
+        <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="medium x N">
           <stringProp name="LoopController.loops">${__P(sizeLoopsBusy,8)}</stringProp>
           <boolProp name="LoopController.continue_forever">true</boolProp>
         </LoopController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="validation cost vs file size: busy (1 user)">
-            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_busy,)}</stringProp>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="validation cost vs file size: medium (1 user)">
+            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_medium,)}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
             <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -884,9 +895,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_normal_1,1)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -1020,6 +1033,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 1 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 1 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -1079,9 +1121,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_normal_2,2)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -1215,6 +1259,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 2 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 2 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -1274,9 +1347,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_normal_3,3)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -1410,6 +1485,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 3 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 3 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -1469,9 +1573,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_normal_4,4)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -1605,6 +1711,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 4 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 4 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -1664,9 +1799,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_normal_5,5)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -1800,6 +1937,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 5 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 5 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -1859,9 +2025,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_normal_6,6)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -1995,6 +2163,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 6 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 6 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -2054,9 +2251,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_normal_7,7)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -2190,6 +2389,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 7 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 7 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -2249,9 +2477,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_normal_8,8)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -2385,6 +2615,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 8 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 8 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -2444,9 +2703,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_normal_9,9)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -2580,6 +2841,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 9 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 9 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -2639,9 +2929,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_normal_10,10)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -2775,6 +3067,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 10 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (normal) @ 10 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -2828,20 +3149,22 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
           </hashTree>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey busy @ 1 user(s)">
-        <stringProp name="TestPlan.comments">The FULL upload journey at 1 concurrent user(s), busy file —
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey medium @ 1 user(s)">
+        <stringProp name="TestPlan.comments">The FULL upload journey at 1 concurrent user(s), medium file —
 initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_busy_1,1)}</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_medium_1,1)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_journey_busy_1,30)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_journey_busy_1,354)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_journey_medium_1,30)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_journey_medium_1,354)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -2884,7 +3207,7 @@ experiences, without a polling loop&apos;s noise in the report.</stringProp>
           <stringProp name="fileEncoding"></stringProp>
         </CSVDataSet>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 1 user(s): initiate">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 1 user(s): initiate">
           <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -2935,7 +3258,7 @@ experiences, without a polling loop&apos;s noise in the report.</stringProp>
           <boolProp name="IfController.useExpression">true</boolProp>
         </IfController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 1 user(s): send file to uploader">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 1 user(s): send file to uploader">
             <stringProp name="TestPlan.comments">The backend returns the uploader PATH only, so the full URL is assembled from
 uploaderUrl. A successful upload answers 302 to the redirect target; the
 redirect is NOT followed — it points at the frontend flow, not the API.</stringProp>
@@ -2951,8 +3274,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </elementProp>
             <elementProp name="HTTPsampler.Files" elementType="HTTPFileArgs">
               <collectionProp name="HTTPFileArgs.files">
-                <elementProp name="${journeyFile_busy}" elementType="HTTPFileArg">
-                  <stringProp name="File.path">${journeyFile_busy}</stringProp>
+                <elementProp name="${journeyFile_medium}" elementType="HTTPFileArg">
+                  <stringProp name="File.path">${journeyFile_medium}</stringProp>
                   <stringProp name="File.paramname">file</stringProp>
                   <stringProp name="File.mimetype">application/geopackage+sqlite3</stringProp>
                 </elementProp>
@@ -2970,7 +3293,36 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 1 user(s): validate incl virus scan">
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 1 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 1 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3023,20 +3375,22 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
           </hashTree>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey busy @ 2 user(s)">
-        <stringProp name="TestPlan.comments">The FULL upload journey at 2 concurrent user(s), busy file —
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey medium @ 2 user(s)">
+        <stringProp name="TestPlan.comments">The FULL upload journey at 2 concurrent user(s), medium file —
 initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_busy_2,0)}</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_medium_2,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_journey_busy_2,30)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_journey_busy_2,0)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_journey_medium_2,30)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_journey_medium_2,0)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -3079,7 +3433,7 @@ experiences, without a polling loop&apos;s noise in the report.</stringProp>
           <stringProp name="fileEncoding"></stringProp>
         </CSVDataSet>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 2 user(s): initiate">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 2 user(s): initiate">
           <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3130,7 +3484,7 @@ experiences, without a polling loop&apos;s noise in the report.</stringProp>
           <boolProp name="IfController.useExpression">true</boolProp>
         </IfController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 2 user(s): send file to uploader">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 2 user(s): send file to uploader">
             <stringProp name="TestPlan.comments">The backend returns the uploader PATH only, so the full URL is assembled from
 uploaderUrl. A successful upload answers 302 to the redirect target; the
 redirect is NOT followed — it points at the frontend flow, not the API.</stringProp>
@@ -3146,8 +3500,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </elementProp>
             <elementProp name="HTTPsampler.Files" elementType="HTTPFileArgs">
               <collectionProp name="HTTPFileArgs.files">
-                <elementProp name="${journeyFile_busy}" elementType="HTTPFileArg">
-                  <stringProp name="File.path">${journeyFile_busy}</stringProp>
+                <elementProp name="${journeyFile_medium}" elementType="HTTPFileArg">
+                  <stringProp name="File.path">${journeyFile_medium}</stringProp>
                   <stringProp name="File.paramname">file</stringProp>
                   <stringProp name="File.mimetype">application/geopackage+sqlite3</stringProp>
                 </elementProp>
@@ -3165,7 +3519,36 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 2 user(s): validate incl virus scan">
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 2 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 2 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3218,20 +3601,22 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
           </hashTree>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey busy @ 5 user(s)">
-        <stringProp name="TestPlan.comments">The FULL upload journey at 5 concurrent user(s), busy file —
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey medium @ 5 user(s)">
+        <stringProp name="TestPlan.comments">The FULL upload journey at 5 concurrent user(s), medium file —
 initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_busy_5,5)}</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_medium_5,5)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_journey_busy_5,8)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_journey_busy_5,389)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_journey_medium_5,8)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_journey_medium_5,389)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -3274,7 +3659,7 @@ experiences, without a polling loop&apos;s noise in the report.</stringProp>
           <stringProp name="fileEncoding"></stringProp>
         </CSVDataSet>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 5 user(s): initiate">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 5 user(s): initiate">
           <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3325,7 +3710,7 @@ experiences, without a polling loop&apos;s noise in the report.</stringProp>
           <boolProp name="IfController.useExpression">true</boolProp>
         </IfController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 5 user(s): send file to uploader">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 5 user(s): send file to uploader">
             <stringProp name="TestPlan.comments">The backend returns the uploader PATH only, so the full URL is assembled from
 uploaderUrl. A successful upload answers 302 to the redirect target; the
 redirect is NOT followed — it points at the frontend flow, not the API.</stringProp>
@@ -3341,8 +3726,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </elementProp>
             <elementProp name="HTTPsampler.Files" elementType="HTTPFileArgs">
               <collectionProp name="HTTPFileArgs.files">
-                <elementProp name="${journeyFile_busy}" elementType="HTTPFileArg">
-                  <stringProp name="File.path">${journeyFile_busy}</stringProp>
+                <elementProp name="${journeyFile_medium}" elementType="HTTPFileArg">
+                  <stringProp name="File.path">${journeyFile_medium}</stringProp>
                   <stringProp name="File.paramname">file</stringProp>
                   <stringProp name="File.mimetype">application/geopackage+sqlite3</stringProp>
                 </elementProp>
@@ -3360,7 +3745,36 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 5 user(s): validate incl virus scan">
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 5 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 5 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3413,20 +3827,22 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
           </hashTree>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey busy @ 10 user(s)">
-        <stringProp name="TestPlan.comments">The FULL upload journey at 10 concurrent user(s), busy file —
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey medium @ 10 user(s)">
+        <stringProp name="TestPlan.comments">The FULL upload journey at 10 concurrent user(s), medium file —
 initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_busy_10,10)}</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_medium_10,10)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_journey_busy_10,8)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_journey_busy_10,402)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_journey_medium_10,8)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_journey_medium_10,402)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -3469,7 +3885,7 @@ experiences, without a polling loop&apos;s noise in the report.</stringProp>
           <stringProp name="fileEncoding"></stringProp>
         </CSVDataSet>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 10 user(s): initiate">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 10 user(s): initiate">
           <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3520,7 +3936,7 @@ experiences, without a polling loop&apos;s noise in the report.</stringProp>
           <boolProp name="IfController.useExpression">true</boolProp>
         </IfController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 10 user(s): send file to uploader">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 10 user(s): send file to uploader">
             <stringProp name="TestPlan.comments">The backend returns the uploader PATH only, so the full URL is assembled from
 uploaderUrl. A successful upload answers 302 to the redirect target; the
 redirect is NOT followed — it points at the frontend flow, not the API.</stringProp>
@@ -3536,8 +3952,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </elementProp>
             <elementProp name="HTTPsampler.Files" elementType="HTTPFileArgs">
               <collectionProp name="HTTPFileArgs.files">
-                <elementProp name="${journeyFile_busy}" elementType="HTTPFileArg">
-                  <stringProp name="File.path">${journeyFile_busy}</stringProp>
+                <elementProp name="${journeyFile_medium}" elementType="HTTPFileArg">
+                  <stringProp name="File.path">${journeyFile_medium}</stringProp>
                   <stringProp name="File.paramname">file</stringProp>
                   <stringProp name="File.mimetype">application/geopackage+sqlite3</stringProp>
                 </elementProp>
@@ -3555,7 +3971,36 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 10 user(s): validate incl virus scan">
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 10 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 10 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3614,9 +4059,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_large_1,1)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -3750,6 +4197,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 1 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 1 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -3809,9 +4285,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_large_2,2)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -3945,6 +4423,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 2 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 2 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -4004,9 +4511,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_large_3,3)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -4140,6 +4649,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 3 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 3 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -4199,9 +4737,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_large_5,5)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -4335,6 +4875,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 5 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 5 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -4394,9 +4963,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_large_8,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -4530,6 +5101,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 8 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 8 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -4589,9 +5189,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_large_10,10)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -4725,6 +5327,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 10 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (large) @ 10 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -4784,9 +5415,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_xlarge_1,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -4920,6 +5553,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 1 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 1 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -4979,9 +5641,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_xlarge_2,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -5115,6 +5779,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 2 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 2 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
@@ -5174,9 +5867,11 @@ initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
 
-No client-side poll: the backend&apos;s validate route waits for the scan
-itself, so the validate leg carries the same wall clock a frontend user
-experiences, without a polling loop&apos;s noise in the report.</stringProp>
+The scan wait sits in its own leg, polling /upload/{id}/status exactly as
+the frontend does. The backend&apos;s validate route waits too, but only for
+UPLOAD_READY_TIMEOUT_MS — a safety net for a caller that already polled,
+not a scan budget. Calling validate straight after the upload turned it
+into a hard three-second deadline on scanning and 504d regardless of load.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_journey_xlarge_5,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -5309,6 +6004,35 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <intProp name="Assertion.test_type">8</intProp>
             </ResponseAssertion>
             <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="waitForScan">
+            <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 5 user(s): wait for scan">
+              <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+              <stringProp name="HTTPSampler.connect_timeout">10000</stringProp>
+              <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+              <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+                <collectionProp name="Arguments.arguments"/>
+              </elementProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract uploadStatus">
+                <stringProp name="JSONPostProcessor.referenceNames">uploadReadyStatus</stringProp>
+                <stringProp name="JSONPostProcessor.jsonPathExprs">$.uploadStatus</stringProp>
+                <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+                <stringProp name="JSONPostProcessor.defaultValues">unknown</stringProp>
+              </JSONPostProcessor>
+              <hashTree/>
+              <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="poll interval">
+                <stringProp name="ConstantTimer.delay">1000</stringProp>
+              </ConstantTimer>
+              <hashTree/>
+            </hashTree>
           </hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (xlarge) @ 5 user(s): validate incl virus scan">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
@@ -8369,13 +9093,13 @@ loops rather than GETting /projects/ with an empty path segment.</stringProp>
             <hashTree/>
           </hashTree>
         </hashTree>
-        <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="busy x N">
+        <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="medium x N">
           <boolProp name="LoopController.continue_forever">false</boolProp>
-          <stringProp name="LoopController.loops">${__P(fetchLoops_busy,3)}</stringProp>
+          <stringProp name="LoopController.loops">${__P(fetchLoops_medium,3)}</stringProp>
         </LoopController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="fetch busy project (GET /projects/{id})">
-            <stringProp name="HTTPSampler.path">/projects/${__P(sizedProjectId_busy,)}</stringProp>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="fetch medium project (GET /projects/{id})">
+            <stringProp name="HTTPSampler.path">/projects/${__P(sizedProjectId_medium,)}</stringProp>
             <stringProp name="HTTPSampler.method">GET</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
             <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
