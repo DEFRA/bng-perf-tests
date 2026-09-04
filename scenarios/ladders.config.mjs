@@ -49,7 +49,7 @@
  * rejects an UPLOAD_SIZES spec naming anything else — a label the plan does not
  * know stages a file nothing validates.
  */
-export const SIZE_LABELS = ['normal', 'busy', 'large', 'xlarge']
+export const SIZE_LABELS = ['normal', 'medium', 'large', 'xlarge']
 
 /**
  * Shell-safe identifiers. Step properties become `-Jname=value` arguments and
@@ -75,7 +75,7 @@ export const LADDERS = [
       // Contiguous 1..10: the point of a ladder is to find the knee, and
       // 1/2/5/10 cannot tell a cliff at 7 from a slope.
       normal: { steps: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], secondsPerIteration: 4 },
-      busy: { steps: [1, 2, 5, 10], secondsPerIteration: 6 },
+      medium: { steps: [1, 2, 5, 10], secondsPerIteration: 6 },
       large: { steps: [1, 2, 3, 5, 8, 10], secondsPerIteration: 14 },
       xlarge: { steps: [1, 2, 5], secondsPerIteration: 30 }
     },
@@ -226,7 +226,7 @@ export const PROFILES = {
     ladders: {
       journey: {
         normal: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        busy: [1, 5, 10],
+        medium: [1, 5, 10],
         large: [1, 2, 3, 5, 10]
       },
       revalidate: { large: [1, 2, 5, 10, 20] },
@@ -237,7 +237,7 @@ export const PROFILES = {
     fetchRamp: true,
     mixedSeconds: 120,
     targetScale: 1,
-    sizeRampLoops: { normal: 20, busy: 8, large: 3, xlarge: 2 }
+    sizeRampLoops: { normal: 20, medium: 8, large: 3, xlarge: 2 }
   }
 }
 
@@ -255,8 +255,8 @@ export const FETCH_RAMP = {
   // on the curve. `xlarge` is a single probe: at ~8 s a fetch it would
   // otherwise be a third of this phase for a document two orders of magnitude
   // past anything in the real corpus.
-  loops: { normal: 5, busy: 3, large: 2, xlarge: 1 },
-  secondsPerIteration: { normal: 1, busy: 2, large: 4, xlarge: 8 }
+  loops: { normal: 5, medium: 3, large: 2, xlarge: 1 },
+  secondsPerIteration: { normal: 1, medium: 2, large: 4, xlarge: 8 }
 }
 
 /** Threads the mixed workload runs with. */
@@ -273,7 +273,7 @@ export const MIXED_THREADS = 8
  */
 export const SIZE_ALLOWANCE_SECONDS = {
   normal: 2,
-  busy: 4,
+  medium: 4,
   large: 12,
   xlarge: 26
 }

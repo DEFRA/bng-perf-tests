@@ -155,7 +155,7 @@ function isMixed(label) {
 
 // The order the size labels are meant to be read in. A ramp presented out of
 // order is not a ramp — it has to climb down the page.
-const SIZE_ORDER = ['normal', 'busy', 'large', 'xlarge']
+const SIZE_ORDER = ['normal', 'medium', 'large', 'xlarge']
 
 /**
  * Sort rows the way a staircase has to be read: by file size, then by
@@ -207,7 +207,7 @@ const WINDOW_EXHAUSTED_PERCENT = 90
  * Did the size ramp actually complete its weighted pass?
  *
  * The ramp is loop-count driven inside a duration guard, so its sample counts
- * are meant to be EXACT — 20 normal, 8 busy, 3 large, 2 xlarge. When the pass
+ * are meant to be EXACT — 20 normal, 8 medium, 3 large, 2 xlarge. When the pass
  * overruns the guard the scheduler cuts the thread group off wherever it has
  * reached, and because the pass runs smallest-first what it loses is the tail:
  * `large` and `xlarge`. Those sizes then have no rows at all, which reads
