@@ -43,10 +43,15 @@ services:
     environment:
       S3_ENDPOINT: 'http://localstack:4566'
       RESULTS_OUTPUT_S3_PATH: 's3://test-results'
-      # The CDP portal's one text field, and the ONLY knob for what runs. Takes
-      # a profile name (standard | short) or a plan name.
+      # PROFILE is what the CDP portal's run form sends, so it is what a local
+      # run should use too — anything else exercises a path no CDP task takes.
       #
-      #   TEST_SCENARIO=short docker compose up --build
+      #   PROFILE=short docker compose up --build
+      PROFILE: ${PROFILE:-}
+      # TEST_SCENARIO names a PLAN (scenarios/<name>.jmx). It also still accepts
+      # a profile name, second, for back-compat; the base image bakes
+      # ENV TEST_SCENARIO=test for its own sample plan, which is why it is pinned
+      # to this suite's plan here rather than left to be inherited.
       TEST_SCENARIO: ${TEST_SCENARIO:-bng-perf}
       ENVIRONMENT: ${ENVIRONMENT:-local}
       # The plan hits BOTH the frontend (home page) and the authenticated backend
@@ -74,7 +79,7 @@ services:
       # every other target above.
       CDP_UPLOADER_URL: ${CDP_UPLOADER_URL:-http://host.docker.internal:7337}
       SERVICE_URL_SCHEME: ${SERVICE_URL_SCHEME:-http}
-      # No PERF_PROFILE: TEST_SCENARIO above is the only knob, exactly as on CDP.
+      # No PERF_PROFILE: it is ignored, exactly as it is on CDP. Use PROFILE.
       # PERF_DUMP_SCHEDULE=true shows a schedule without running it, and the
       # per-phase env knobs in the README narrow a run.
       PERF_DUMP_SCHEDULE: ${PERF_DUMP_SCHEDULE:-}

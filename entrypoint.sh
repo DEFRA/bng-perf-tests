@@ -47,9 +47,11 @@ fi
 # selecting; TEST_SCENARIO exists only as an escape hatch, and an unknown name
 # falls back to the default, so a stale placeholder (e.g. the base image's
 # inherited TEST_SCENARIO=test) can never fail the run.
-# Resolved once ladders.sh has said which PROFILE names exist, because the CDP
-# portal's single text field can name either a plan or a profile — see "the
-# portal's one text field" below.
+#
+# This is the PLAN only. What the CDP portal's run form sends is PROFILE, which
+# names a profile rather than a plan and is resolved further down, once
+# ladders.sh has said which profile names this image actually has — see "the
+# portal's Profile field" below.
 SCENARIO=${TEST_SCENARIO:-bng-perf}
 
 # Per-service targets. The home-page group hits the frontend; the project-list
@@ -165,37 +167,86 @@ profile_is_known() {
   return 1
 }
 
-# ── One knob: TEST_SCENARIO ─────────────────────────────────────────────────
-# A CDP perf-test task is configured through a single free-text field, and it
-# reaches the container as TEST_SCENARIO — which is why this variable exists at
-# all: the base image bakes ENV TEST_SCENARIO=test for its own sample plan.
+# ── One knob: the portal's Profile field ────────────────────────────────────
+# A CDP perf-test task is configured through a single free-text field — the
+# portal's "Profile" — and it reaches the container as PROFILE. That is set by
+# cdp-self-service-ops, which builds the ECS task message with
+# `environment_variables: { ..., PROFILE: profile }`
+# (src/api/deploy-test-suite/helpers/generate-test-run-message.js).
 #
-# It is the ONLY input this script takes for what to run. There was a second
-# knob, PERF_PROFILE, and two knobs for one decision is one too many: whichever
-# loses is a setting that silently does nothing. A PERF_PROFILE left on a task
-# from an earlier run would have quietly overridden whatever someone typed into
-# the portal, and nothing in the output would have said so.
+# It is NOT TEST_SCENARIO. That variable belongs to the base image, which bakes
+# ENV TEST_SCENARIO=test for its own sample plan; nothing in the portal ever
+# sets it. Reading the wrong one is how a run of this suite typed as `short`
+# came back having run the whole standard suite: PROFILE=short arrived,
+# TEST_SCENARIO was empty, `${TEST_SCENARIO:-bng-perf}` found a plan that
+# exists, so not one warning fired anywhere. The task went green, the portal
+# showed the value that had been asked for, and the report answered a different
+# question. That silence is why the resolution below is announced on EVERY run,
+# including the default one — the failure mode here is not a run that breaks,
+# it is a run that succeeds at the wrong thing.
 #
-# The field names EITHER a profile (see PERF_PROFILE_NAMES) or a plan
-# (scenarios/<name>.jmx). A profile runs the whole plan at that profile's thread
-# counts — which needs nothing else, because every thread group is already in
-# the plan and a profile only sets thread counts. A plan name runs that plan at
-# the default profile.
+# TEST_SCENARIO is still read, second, and is still the only thing that can name
+# a PLAN (scenarios/<name>.jmx). It also accepts a profile name, because that is
+# what a local `TEST_SCENARIO=short ./entrypoint.sh` and the compose file use.
+#
+# PERF_PROFILE remains ignored. Two knobs for one decision means whichever loses
+# is a setting that silently does nothing, and a PERF_PROFILE left on a task
+# from an earlier run would quietly beat what someone typed into the portal.
 #
 # PERF_PROFILE below is the RESOLVED name. The rest of this script reads it, and
 # it is passed explicitly to the summariser; it is NOT read from the
 # environment.
 if [ -n "${PERF_PROFILE}" ]; then
-  echo "▸ NOTE: PERF_PROFILE='${PERF_PROFILE}' is ignored — the run is chosen by TEST_SCENARIO alone." >&2
-  echo "        Use TEST_SCENARIO=${PERF_PROFILE} instead." >&2
+  echo "▸ NOTE: PERF_PROFILE='${PERF_PROFILE}' is ignored — the run is chosen by the portal's Profile field." >&2
+  echo "        Enter '${PERF_PROFILE}' under Profile when you start the run." >&2
+fi
+
+# What was asked for, and which variable carried it. Kept separate from the
+# resolved name so the announcement can tell "nobody asked" from "someone asked
+# for something this image does not have" — the two have different fixes, and
+# conflating them is what made the original failure unreadable.
+PROFILE_ASKED=""
+PROFILE_SOURCE="default"
+if [ -n "${PROFILE}" ]; then
+  PROFILE_ASKED=${PROFILE}
+  PROFILE_SOURCE="PROFILE"
+elif [ -n "${TEST_SCENARIO}" ]; then
+  PROFILE_ASKED=${TEST_SCENARIO}
+  PROFILE_SOURCE="TEST_SCENARIO"
 fi
 
 PERF_PROFILE=${PERF_PROFILE_DEFAULT}
-if [ -n "${TEST_SCENARIO}" ] && profile_is_known "${TEST_SCENARIO}"; then
-  echo "▸ TEST_SCENARIO='${TEST_SCENARIO}' names a profile rather than a plan — running the '${TEST_SCENARIO}' profile against bng-perf.jmx"
-  PERF_PROFILE=${TEST_SCENARIO}
+PROFILE_MATCHED="false"
+if [ -n "${PROFILE_ASKED}" ] && profile_is_known "${PROFILE_ASKED}"; then
+  PERF_PROFILE=${PROFILE_ASKED}
+  PROFILE_MATCHED="true"
+  # A profile always runs the whole plan — every thread group is already in it,
+  # and a profile only sets thread counts.
   SCENARIO=bng-perf
 fi
+
+# Say what happened, always. Three outcomes, and each names its own fix.
+announce_profile() {
+  if [ "${PROFILE_MATCHED}" = "true" ]; then
+    echo "▸ profile: ${PROFILE_SOURCE}='${PROFILE_ASKED}' — running the '${PERF_PROFILE}' profile against bng-perf.jmx"
+    return 0
+  fi
+  if [ "${PROFILE_SOURCE}" = "default" ]; then
+    echo "▸ profile: no Profile value reached this task — running the default '${PERF_PROFILE}' profile."
+    echo "           To run another, press Yes under Profile on the run form and enter one of: ${PERF_PROFILE_NAMES}"
+    return 0
+  fi
+  if [ "${PROFILE_SOURCE}" = "TEST_SCENARIO" ]; then
+    # TEST_SCENARIO can still name a plan, and the plan check below is what
+    # decides that. Nothing to warn about yet.
+    return 0
+  fi
+  echo "▸ WARNING: PROFILE='${PROFILE_ASKED}' is not a profile this image has." >&2
+  echo "           Known profiles: ${PERF_PROFILE_NAMES}. Names are compared exactly —" >&2
+  echo "           a capital letter or a stray space will not match." >&2
+  echo "           Falling back to '${PERF_PROFILE}', so this run measures the default suite." >&2
+}
+announce_profile
 
 # Now the plan. An unknown name still falls back rather than failing the run, so
 # a stale placeholder on the task (the base image's inherited TEST_SCENARIO=test)
