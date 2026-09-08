@@ -23,8 +23,12 @@ import {
   SIZE_LABELS,
   WINDOW_BOUNDS,
   budgetCheck,
+  generatedBlockStartSeconds,
   ladderSteps,
+  phasesBeyondCutoff,
+  phasesWithinCutoff,
   profilePhases,
+  stepAllowanceSeconds,
   scheduleFrom,
   stepKey,
   windowSeconds
@@ -45,7 +49,9 @@ describe('window derivation', () => {
   })
 
   test('windows stay inside the clamp at both ends', () => {
-    for (const ladder of LADDERS) {
+    // Closed-loop ladders only. A burst ladder's window is not a sample budget
+    // to be clamped — see the next test.
+    for (const ladder of LADDERS.filter((l) => !l.burst)) {
       for (const step of ladderSteps(ladder)) {
         const window = windowSeconds(step)
         assert.ok(
@@ -58,6 +64,35 @@ describe('window derivation', () => {
         )
       }
     }
+  })
+
+  test('a burst window is a safety net, so it EXCEEDS the burst it guards', () => {
+    // The failure this prevents is the quiet one: a window shorter than the
+    // burst cuts threads off mid-flight, and the rung then reports a refusal
+    // rate computed from a partial sample as though it were a whole one. The
+    // clamp above would have imposed exactly that on xlarge, which is why burst
+    // ladders are excluded from it rather than squeezed into it.
+    for (const ladder of LADDERS.filter((l) => l.burst)) {
+      for (const step of ladderSteps(ladder)) {
+        const window = windowSeconds(step)
+        const burst = stepAllowanceSeconds(ladder, step.size) * ladder.bursts
+        assert.ok(
+          window > burst,
+          `${stepKey(step)} window ${window}s does not clear its ${burst}s burst`
+        )
+      }
+    }
+  })
+
+  test('a burst window does not shrink as the burst gets wider', () => {
+    // Every closed-loop window divides by `users`, because N threads produce
+    // samples N times faster. A burst is ONE simultaneous round however wide it
+    // is, so the same division would give the widest rungs — the ones most
+    // likely to saturate — the least time to finish.
+    const ladder = LADDERS.find((l) => l.burst)
+    const narrow = windowSeconds({ ladder, size: 'large', users: 2 })
+    const wide = windowSeconds({ ladder, size: 'large', users: 12 })
+    assert.equal(narrow, wide)
   })
 
   test('a bigger file gets a longer window at the same concurrency', () => {
@@ -98,11 +133,21 @@ describe('profiles', () => {
     assert.deepEqual(users, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
   })
 
-  test('standard is the only profile', () => {
-    // The suite deliberately has ONE profile: five step lists proved harder to
-    // keep meaningful than one. A second entry here should be a conscious
-    // decision to bring the profile machinery back, not an accident.
-    assert.deepEqual(Object.keys(PROFILES), ['standard'])
+  test('the profile list is exactly the two intended ones', () => {
+    // The suite deliberately collapsed FIVE profiles into one: quick/standard/
+    // deep/full/soak were different sampling depths of the SAME question, and
+    // keeping five step lists meaningful cost more than the flexibility bought.
+    // That decision still stands, and this assertion still guards it.
+    //
+    // `short` is admitted against it on purpose, because it is not another
+    // depth of the same question. It asks the opposite one — where the service
+    // starts REFUSING work — and answers it with a different pass rule (503 is
+    // data, not failure), a different step shape (bursts, not closed loops) and
+    // a cutoff instead of a budget. None of that could live as a knob on
+    // `standard` without making `standard` mean two things.
+    //
+    // A THIRD entry should be a conscious decision, not an accident.
+    assert.deepEqual(Object.keys(PROFILES), ['standard', 'short'])
   })
 })
 
@@ -144,6 +189,152 @@ describe('schedule', () => {
         [...users].sort((a, b) => a - b),
         `${group} does not climb`
       )
+    }
+  })
+})
+
+describe("the CDP portal's one text field", () => {
+  /**
+   * A CDP perf-test task is configured through a single free-text field, which
+   * reaches the container as TEST_SCENARIO. It used to select a PLAN only, so
+   * typing a profile name into it selected no plan, fell back to the default,
+   * left PERF_PROFILE unset — and ran the full ~18-minute standard suite while
+   * looking like it had done what was asked. These pin the mapping that fixes
+   * that, because the failure mode is a run that succeeds at the wrong thing.
+   */
+  const run = (env) =>
+    execFileSync('sh', [join(ROOT, 'entrypoint.sh')], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        JM_HOME: ROOT,
+        ENVIRONMENT: 'local',
+        PERF_DUMP_SCHEDULE: 'true',
+        PERF_PROFILE: '',
+        TEST_SCENARIO: '',
+        ...env
+      },
+      stdio: ['ignore', 'pipe', 'ignore']
+    })
+
+  const phasesIn = (output) =>
+    output.split('\n').filter((line) => line.startsWith('PHASE ')).map((l) => l.split(' ')[1])
+
+  test('a profile name typed into it selects that profile', () => {
+    const phases = phasesIn(run({ TEST_SCENARIO: 'short' }))
+    assert.ok(phases.length > 0, 'expected the saturation ladder to be scheduled')
+    assert.ok(
+      phases.every((key) => key.startsWith('saturate_')),
+      `expected only saturation rungs, got ${phases.slice(0, 3).join(', ')}`
+    )
+  })
+
+  test('an unknown value still runs, at the default profile', () => {
+    // The base image bakes ENV TEST_SCENARIO=test for its own sample plan. A
+    // stale placeholder must never fail the run.
+    const phases = phasesIn(run({ TEST_SCENARIO: 'test' }))
+    assert.ok(phases.some((key) => key.startsWith('journey_')))
+    assert.ok(!phases.some((key) => key.startsWith('saturate_')))
+  })
+
+  test('a stale PERF_PROFILE cannot override the portal field', () => {
+    // TEST_SCENARIO is the ONLY knob. Two knobs for one decision means whichever
+    // loses is a setting that silently does nothing — and a PERF_PROFILE left on
+    // a task from an earlier run would have quietly beaten what someone typed
+    // into the portal, with nothing in the output saying so.
+    const phases = phasesIn(run({ TEST_SCENARIO: 'short', PERF_PROFILE: 'standard' }))
+    assert.ok(
+      phases.every((key) => key.startsWith('saturate_')),
+      'TEST_SCENARIO=short must win over a leftover PERF_PROFILE'
+    )
+  })
+
+  test('and PERF_PROFILE alone selects nothing', () => {
+    // It is ignored rather than honoured, so it must not quietly work either.
+    const phases = phasesIn(run({ PERF_PROFILE: 'short' }))
+    assert.ok(phases.some((key) => key.startsWith('journey_')))
+    assert.ok(!phases.some((key) => key.startsWith('saturate_')))
+  })
+
+  test('unset runs the whole suite', () => {
+    const phases = phasesIn(run({}))
+    assert.ok(phases.some((key) => key.startsWith('journey_')))
+  })
+})
+
+describe('the saturation cutoff', () => {
+  test('a profile with no cutoff runs everything it lists', () => {
+    assert.deepEqual(phasesWithinCutoff('standard'), profilePhases('standard'))
+    assert.deepEqual(phasesBeyondCutoff('standard'), [])
+  })
+
+  test('kept and skipped together account for every listed rung', () => {
+    // Nothing may go missing between the two: a rung in neither list is a rung
+    // that silently never ran and was never reported as unrun.
+    const kept = phasesWithinCutoff('short').map((p) => p.key)
+    const skipped = phasesBeyondCutoff('short').map((p) => p.key)
+    assert.deepEqual(
+      [...kept, ...skipped].sort(),
+      profilePhases('short').map((p) => p.key).sort()
+    )
+  })
+
+  test('every rung it keeps actually finishes inside the cutoff', () => {
+    const cutoff = PROFILES.short.cutoffSeconds
+    const scheduled = scheduleFrom(
+      phasesWithinCutoff('short'),
+      generatedBlockStartSeconds('short')
+    )
+    for (const phase of scheduled) {
+      assert.ok(
+        phase.delay + phase.window <= cutoff,
+        `${phase.key} ends at ${phase.delay + phase.window}s, past the ${cutoff}s cutoff`
+      )
+    }
+  })
+
+  test('it keeps a contiguous PREFIX rather than cherry-picking what fits', () => {
+    // The tempting bug is to skip an expensive rung and take a later cheap one.
+    // That would silently reorder the staircase and produce, say, an xlarge rung
+    // with no large rungs beneath it to read it against.
+    const all = profilePhases('short').map((p) => p.key)
+    const kept = phasesWithinCutoff('short').map((p) => p.key)
+    assert.deepEqual(kept, all.slice(0, kept.length))
+  })
+
+  test('every size that runs at all gets enough rungs to bracket a knee', () => {
+    // A single rung brackets nothing: it can say "refused here" or "clear here",
+    // never "clear at N, refused at M". So a size is either measured properly or
+    // reported as not measured — a lone rung is the useless middle, and it looks
+    // like data.
+    //
+    // This deliberately does NOT pin which sizes run. That is a weighting
+    // decision in the profile, and it has changed once already: an earlier mix
+    // guaranteed two xlarge rungs, and tightening normal/busy to get quotable
+    // knees spent that budget. What must hold either way is that whatever runs
+    // is interpretable.
+    const bySize = new Map()
+    for (const phase of phasesWithinCutoff('short')) {
+      const size = phase.key.replace('saturate_', '').replace(/_\d+$/, '')
+      bySize.set(size, (bySize.get(size) ?? 0) + 1)
+    }
+    assert.ok(bySize.size > 0, 'the profile must run something')
+    for (const [size, count] of bySize) {
+      assert.ok(count >= 2, `${size} has only ${count} rung inside the cutoff`)
+    }
+  })
+
+  test('the saturation ladder climbs within each size', () => {
+    // A staircase that does not climb cannot find a knee — and with a prefix
+    // cutoff, an unsorted ladder would also truncate in the wrong place.
+    const bySize = new Map()
+    for (const phase of phasesWithinCutoff('short')) {
+      const size = phase.key.replace('saturate_', '').replace(/_\d+$/, '')
+      bySize.set(size, [...(bySize.get(size) ?? []), phase.users])
+    }
+    for (const [size, users] of bySize) {
+      assert.deepEqual(users, [...users].sort((a, b) => a - b), `${size} does not climb`)
     }
   })
 })
@@ -196,7 +387,11 @@ describe('entrypoint.sh derives the same schedule this config does', () => {
           ...process.env,
           JM_HOME: ROOT,
           ENVIRONMENT: 'local',
-          PERF_PROFILE: name,
+          // TEST_SCENARIO, not PERF_PROFILE: the portal's field is the only knob
+          // the entrypoint takes, so driving it any other way would test a path
+          // no real run uses.
+          TEST_SCENARIO: name,
+          PERF_PROFILE: '',
           PERF_DUMP_SCHEDULE: 'true'
         },
         stdio: ['ignore', 'pipe', 'ignore']
@@ -221,7 +416,12 @@ describe('entrypoint.sh derives the same schedule this config does', () => {
       const anchor = fromShell.length ? fromShell[0].delay : 0
       // No gap override: each phase carries its own drain time, and the point of
       // this test is that the shell honours the same ones.
-      const fromConfig = scheduleFrom(profilePhases(name), anchor).map(
+      //
+      // `phasesWithinCutoff`, not `profilePhases`: a profile with a cutoff runs
+      // a PREFIX of what it lists, and the shell is handed that prefix. Comparing
+      // against the full list would fail on the rungs the cutoff drops — which
+      // is exactly what it did when the cutoff was introduced.
+      const fromConfig = scheduleFrom(phasesWithinCutoff(name), anchor).map(
         ({ key, users, window, delay }) => ({
         key,
         // The mixed workload has no user count in the ladder tables; the shell
@@ -238,6 +438,29 @@ describe('entrypoint.sh derives the same schedule this config does', () => {
 })
 
 describe('the committed plan', () => {
+  test('no typed prop carries a ${...} expression', () => {
+    // `intProp`, `longProp` and `boolProp` are parsed as literals the moment
+    // JMeter loads the XML, so a property function inside one fails the ENTIRE
+    // plan before a single sampler runs:
+    //
+    //   NumberFormatException: For input string: "${__P(saturateGateTimeoutMs,120000)}"
+    //
+    // Nothing catches that until JMeter itself parses the file, which is a
+    // container away from here — so this is the cheap stand-in. A value that
+    // has to be substituted belongs in a stringProp; JMeter coerces it at run
+    // time. (This is a real bug the saturation SyncTimer shipped with.)
+    const jmx = readFileSync(join(ROOT, 'scenarios', 'bng-perf.jmx'), 'utf8')
+    const offenders = [
+      ...jmx.matchAll(/<(intProp|longProp|boolProp)\s+name="([^"]+)">([^<]*)<\/\1>/g)
+    ].filter(([, , , value]) => value.includes('${'))
+    assert.deepEqual(
+      offenders.map(([, tag, name, value]) => `${tag} ${name}=${value}`),
+      [],
+      'these must be stringProp, or JMeter will refuse to load the plan'
+    )
+  })
+
+
   test('bng-perf.jmx and ladders.sh are in step with ladders.config.mjs', () => {
     // The generated half of the plan is committed, so it can go stale the
     // moment someone edits the config without re-running the generator. This

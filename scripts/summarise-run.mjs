@@ -18,6 +18,12 @@ import { readFileSync } from 'node:fs'
 
 import { parse } from 'csv-parse/sync'
 
+import {
+  PROFILES,
+  phasesBeyondCutoff,
+  phasesWithinCutoff
+} from '../scenarios/ladders.config.mjs'
+
 const PERCENTILE_95 = 0.95
 const MS_PER_SECOND = 1000
 
@@ -152,6 +158,9 @@ function isFetch(label) {
 function isMixed(label) {
   return label.startsWith('mixed: ')
 }
+function isSaturation(label) {
+  return label.startsWith('saturation: burst of ')
+}
 
 // The order the size labels are meant to be read in. A ramp presented out of
 // order is not a ramp — it has to climb down the page.
@@ -170,13 +179,29 @@ const SIZE_ORDER = ['normal', 'busy', 'large', 'xlarge']
  */
 const SORT_SIZE_STRIDE = 1000
 
+/**
+ * How many requests a label says were concurrent.
+ *
+ * Two spellings, because the saturation ladder measures a BURST rather than a
+ * sustained user count and says so in its label. Without this the whole ladder
+ * would key on 0 and the rungs would come out in file order rather than
+ * climbing — and a staircase that does not climb hides its own knee.
+ */
+function labelConcurrency(label) {
+  const users = /(\d+) user/.exec(label)
+  if (users) {
+    return Number(users[1])
+  }
+  const burst = /burst of (\d+)/.exec(label)
+  return burst ? Number(burst[1]) : 0
+}
+
 function sortKey(label) {
   const size = SIZE_ORDER.findIndex(
     (name) => label.includes(`(${name})`) || label.includes(` ${name} `)
   )
-  const users = /(\d+) user/.exec(label)
   const sizeRank = size === -1 ? SIZE_ORDER.length : size
-  return sizeRank * SORT_SIZE_STRIDE + (users ? Number(users[1]) : 0)
+  return sizeRank * SORT_SIZE_STRIDE + labelConcurrency(label)
 }
 
 function summariseGroup(samples, predicate) {
@@ -430,6 +455,154 @@ function contentionSplit(samples) {
  * phase's start and end, so "ordinary page load during 20 concurrent uploads"
  * is directly comparable to the same page load when nothing else is happening.
  */
+/**
+ * The saturation ladder, reported as a REFUSAL RATE rather than a latency.
+ *
+ * Every other section in this report treats a non-200 as a failure. Here a 503
+ * is the measurement: it carries VALIDATION_BUSY and means the validator shed
+ * the request deliberately rather than looking at the file. The same move the
+ * contention section already makes for its 409s, one status code along.
+ *
+ * The latency columns cover the SERVED requests only. Averaging a refusal into
+ * them would drag the mean down exactly as the service got worse — a refusal
+ * comes back in about a second, a served large file can take twenty — so a
+ * saturating rung would look FASTER than a healthy one.
+ */
+const HTTP_SERVICE_UNAVAILABLE = '503'
+
+/** `saturation: burst of 8 on one large upload` → { size: 'large', burst: 8 } */
+function saturationStep(label) {
+  const match = /burst of (\d+) on one (\w+) upload/.exec(label)
+  return match ? { burst: Number(match[1]), size: match[2] } : null
+}
+
+function saturationSplit(samples) {
+  const byLabel = summariseGroup(samples, isSaturation)
+  if (byLabel.size === 0) {
+    return null
+  }
+  const rows = []
+  const bySize = new Map()
+  for (const [label, group] of byLabel) {
+    const step = saturationStep(label)
+    const refused = group.filter((s) => s.code === HTTP_SERVICE_UNAVAILABLE)
+    const served = group.filter((s) => s.code !== HTTP_SERVICE_UNAVAILABLE)
+    const st = stats(served)
+    const refusedPct = Math.round((refused.length / group.length) * PERCENT)
+    rows.push([
+      step ? step.size : '?',
+      step ? step.burst : '?',
+      group.length,
+      served.length,
+      refused.length,
+      `${refusedPct}%`,
+      fmtMs(st.p95),
+      fmtMs(st.max)
+    ])
+    if (step) {
+      bySize.set(step.size, [
+        ...(bySize.get(step.size) ?? []),
+        { burst: step.burst, refused: refused.length }
+      ])
+    }
+  }
+  return { rows, knees: [...bySize].map(([size, rungs]) => knee(size, rungs)) }
+}
+
+/**
+ * Where one size's ladder stopped being clear.
+ *
+ * `clearTo` is the last rung of the CONTIGUOUS clean run, not simply the widest
+ * rung that happened to refuse nothing. The difference is the whole reliability
+ * of the number: a refusal at 4 followed by a clean 8 — which happens when a
+ * burst lands just as the pool drains — would otherwise be published as "clear
+ * to 8", and that is the figure capacity planning would be built on.
+ */
+function knee(size, rungs) {
+  const climbing = [...rungs].sort((a, b) => a.burst - b.burst)
+  const firstRefused = climbing.find((rung) => rung.refused > 0) ?? null
+  const clean = firstRefused
+    ? climbing.filter((rung) => rung.burst < firstRefused.burst)
+    : climbing
+  const clearTo =
+    clean.length && clean.every((rung) => rung.refused === 0)
+      ? clean.at(-1).burst
+      : null
+  return { size, clearTo, firstRefusedAt: firstRefused?.burst ?? null }
+}
+
+/** One size's verdict, in the terms someone pasting it into a ticket needs. */
+function kneeLine({ size, clearTo, firstRefusedAt }) {
+  if (firstRefusedAt === null) {
+    return `  ${size}: nothing refused on this ladder — the knee is above the widest rung run.`
+  }
+  if (clearTo === null) {
+    return `  ${size}: refused from the very first rung — no clear capacity was demonstrated.`
+  }
+  return `  ${size}: clear to a burst of ${clearTo}; first refusal at ${firstRefusedAt}.`
+}
+
+/**
+ * The rungs the report must NOT let you read as clean.
+ *
+ * A saturation ladder is truncated on purpose — the profile lists more than its
+ * cutoff can run — so rungs are routinely missing from the results. A missing
+ * rung and a rung that refused nothing look identical in a table of what WAS
+ * measured, and reading one as the other claims capacity that was never tested.
+ * That is the single most dangerous mistake this report could make, so the two
+ * reasons a rung can be absent are named separately:
+ *
+ *   past the cutoff   expected, and the profile knew in advance. Not a problem.
+ *   no samples        the rung was scheduled and produced nothing — a staging
+ *                     failure, or a window so short the burst was cut off. This
+ *                     one is a problem, and it would otherwise be silent.
+ *
+ * Needs to know which profile ran, which only the environment knows. With no
+ * PERF_PROFILE set (someone summarising a JTL by hand) it says nothing rather
+ * than guessing against the wrong ladder.
+ */
+function unmeasuredNotes(samples) {
+  const profileName = process.env.PERF_PROFILE
+  if (!profileName || !PROFILES[profileName]) {
+    return []
+  }
+  const isSaturateKey = (key) => key.startsWith('saturate_')
+  const describe = (key) => {
+    const [, size, burst] = key.split('_')
+    return `${size} @ burst of ${burst}`
+  }
+
+  const measured = new Set()
+  for (const sample of samples) {
+    const step = isSaturation(sample.label) && saturationStep(sample.label)
+    if (step) {
+      measured.add(`saturate_${step.size}_${step.burst}`)
+    }
+  }
+
+  const notes = []
+  const beyond = phasesBeyondCutoff(profileName)
+    .map((phase) => phase.key)
+    .filter(isSaturateKey)
+  if (beyond.length) {
+    notes.push(
+      `\n  NOT MEASURED — past the ${PROFILES[profileName].cutoffSeconds}s cutoff, never attempted:`
+    )
+    notes.push(`    ${beyond.map(describe).join(', ')}`)
+  }
+
+  const silent = phasesWithinCutoff(profileName)
+    .map((phase) => phase.key)
+    .filter((key) => isSaturateKey(key) && !measured.has(key))
+  if (silent.length) {
+    notes.push('\n  NOT MEASURED — scheduled but produced NO samples. This is a')
+    notes.push('  problem, not a truncation: check staging supplied an uploadId for')
+    notes.push('  the size, and that the rung had time to finish its burst.')
+    notes.push(`    ${silent.map(describe).join(', ')}`)
+  }
+  return notes
+}
+
 function collateralImpact(samples) {
   const probes = samples.filter(
     (s) => s.label === 'probe: project list under load (GET /projects)'
@@ -560,6 +733,62 @@ function main() {
       return [label, s.count, fmtMs(s.mean), fmtMs(s.p95), fmtMs(s.max), `${s.failedPct}%`]
     })
     out.push(table(rows, ['', 'n', 'mean', 'p95', 'worst', 'failed']))
+  }
+
+  const saturation = saturationSplit(samples)
+  if (saturation) {
+    out.push(section('Where does the service start REFUSING uploads?'))
+    out.push(
+      table(saturation.rows, [
+        'size',
+        'burst',
+        'sent',
+        'served',
+        '503 busy',
+        'refused',
+        'p95',
+        'worst'
+      ])
+    )
+    out.push('')
+    for (const line of saturation.knees.map(kneeLine)) {
+      out.push(line)
+    }
+    out.push(
+      '\n  A 503 here is the load shed, not a failure: it carries VALIDATION_BUSY'
+    )
+    out.push(
+      '  and means the file was never looked at. The latency columns cover the'
+    )
+    out.push(
+      '  SERVED requests only — a refusal returns in about a second, so folding'
+    )
+    out.push('  refusals in would make a saturating rung look faster than a healthy one.')
+    out.push(
+      '\n  Which refusal fired is NOT on the wire. Slice GeoPackageValidationBusy'
+    )
+    out.push(
+      '  by `reason`, or grep the backend log for "validation refused as busy":'
+    )
+    out.push('  no_capacity | queue_full | queue_wait | memory_budget.')
+    out.push('\n  In the JMeter dashboard, two views show the same thing visually:')
+    out.push(
+      '    Statistics table  — one row per rung; its `Error %` column IS the'
+    )
+    out.push(
+      '                        refusal rate, so read it down the page and the'
+    )
+    out.push('                        knee is where it stops being 0.')
+    out.push(
+      '    Codes Per Second  — (Charts > Throughput) each response code as its'
+    )
+    out.push(
+      '                        own series, so the 503 line appearing is the'
+    )
+    out.push('                        moment the service began shedding.')
+    for (const line of unmeasuredNotes(samples)) {
+      out.push(line)
+    }
   }
 
   const contention = contentionSplit(samples)

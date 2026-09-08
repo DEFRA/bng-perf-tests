@@ -698,7 +698,7 @@ run is meaningless.
 
 | Env var                          | Default                                        | Purpose                                                        |
 | -------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
-| `TEST_SCENARIO`                  | `bng-perf`                                     | Escape hatch only — leave unset to run the whole suite.         |
+| `TEST_SCENARIO`                  | `bng-perf`                                     | The CDP portal's single text field. Accepts a **profile** name (`short`) or a plan name; unset runs the whole suite at `standard`. |
 | `UPLOAD_SIZES`                   | `normal:80,busy:800,large:5000,xlarge:12000` | How big each step is. `label:parcels` pairs — the **labels are fixed**, see below. |
 | `STAGE_UPLOADS`                  | `true` for this plan                           | `false` skips staging *and* every phase that needed it.         |
 | `CDP_UPLOADER_URL`               | `https://cdp-uploader.<ENVIRONMENT>.cdp-int.defra.cloud` | The uploader to POST staged files to.                 |
@@ -718,7 +718,7 @@ run is meaningless.
 | `SIZE_RAMP_LOOPS`                | `1`                                            | Weighted passes over the four sizes.                            |
 | `SIZE_LOOPS_{NORMAL,BUSY,LARGE,XLARGE}` | `20/8/3/2`                            | Samples per size in a pass. Weighted so small files earn a percentile. |
 | `SIZE_RAMP_DELAY_SECONDS`        | _derived_                                      | When the size ramp starts.                                      |
-| `PERF_PROFILE`                   | `standard`                                     | The only profile. See [The profile](#the-profile--how-long-a-run-takes). |
+| ~~`PERF_PROFILE`~~               | —                                              | **Ignored.** Use `TEST_SCENARIO` — it is the only knob for what runs. |
 | `PERF_DUMP_SCHEDULE`             | unset                                          | `true` prints the resolved schedule and exits, touching nothing. |
 | `WINDOW_<step>`                  | _derived_                                      | Override one step's window, e.g. `WINDOW_journey_normal_10=30`. The timeline re-derives around it. |
 | `PHASE_GAP_SECONDS`              | _derived per phase_                            | Set it and every phase gets that uniform gap instead of its own drain time. |
@@ -971,6 +971,220 @@ docker compose up --build
   so the image is rebuilt.
 * On Docker Desktop `host.docker.internal` resolves to the host natively; on Linux
   the compose file adds the `host-gateway` mapping so it resolves there too.
+
+## Finding the saturation point — the `short` profile
+
+Every other ladder in this suite is calibrated to sit **below** the knee. Every
+validate leg asserts `Status 200`, so a 503 there is a run failure. That is the
+right call for a suite whose job is to measure latency, and the wrong tool for
+the question *"how many concurrent uploads can this instance take before it
+starts refusing them?"*
+
+Nothing measured that. The refusal thresholds were only ever *derived* from the
+backend's config:
+
+| Ceiling | Arithmetic | At the shipped defaults |
+| --- | --- | --- |
+| Depth | `VALIDATION_WORKER_COUNT` + `VALIDATION_WORKER_QUEUE_LIMIT`, where workers clamp to `availableParallelism() - 1` | 2 + 8 = **10 in flight** |
+| Time | a job waiting longer than `VALIDATION_QUEUE_WAIT_LIMIT_MS` is refused rather than started | **5 s** |
+| Memory | `VALIDATION_PARSE_BUDGET_BYTES` ÷ (2 MB + 10 × file size) | 550 MiB ÷ 43 MB ≈ **13** for `large` |
+
+The lowest of the three is the knee. The `short` profile **measures** it.
+
+```sh
+TEST_SCENARIO=short ./entrypoint.sh          # or: TEST_SCENARIO=short docker compose up --build
+```
+
+It climbs a ladder of concurrency levels, fires each as a *simultaneous burst*
+at `/baseline/validate/{uploadId}`, and reports the level it stayed clear to and
+the level it began shedding — ~5 minutes, all four file sizes listed.
+
+It is called `short` for what it COSTS, because that name is typed by hand into
+the CDP portal and a short name is a name people get right. What it DOES is
+saturation, so every place the profile is announced says so:
+
+```
+  profile:  short — 14 ladder phase(s), 300s cutoff — the ladder is truncated to fit
+```
+
+If you want a quick smoke run rather than a deliberate overload, `short` is not
+it. Narrow `standard` with the per-phase env knobs instead.
+
+### Reading the output
+
+```
+  size    burst  sent  served  503 busy  refused  p95    worst
+  large   2      2     2       0         0%       9.2s   9.2s
+  large   4      4     4       0         0%       15.0s  15.0s
+  large   6      6     5       1         17%      21.1s  21.1s
+  large   8      8     5       3         38%      20.2s  20.2s
+
+  large: clear to a burst of 4; first refusal at 6.
+```
+
+* **`clear to N`** is the number to quote as capacity — the last level at which
+  nothing was turned away. The knee lies between it and the first refused rung,
+  so **the gap between them is the measurement's error bar**.
+* The latency columns cover the **served** requests only. A refusal returns in
+  about a second, so folding them in would make a saturating rung look *faster*
+  than a healthy one.
+* `N` is **concurrent validations, not concurrent users**. A queue slot and its
+  parse-budget credit are held only while the file is being validated — someone
+  waiting on a virus scan holds neither — so the number of simultaneous users
+  the service supports is higher than this figure.
+* The ceilings are **per instance**. Two tasks means two independent budgets, so
+  capacity scales with instance count.
+
+### What the run cannot see
+
+The 503 body carries **no reason**. `no_capacity`, `queue_full`, `queue_wait`
+and `memory_budget` are deliberately kept off the wire and go to the
+`GeoPackageValidationBusy` metric and a `warn` line instead. Which fired is the
+difference between "add workers" and "the files are too big for the budget", so
+attribute it from the backend side:
+
+```sh
+grep "validation refused as busy" <backend log>
+```
+
+#### Running it from the CDP Portal
+
+The portal configures a task through a single free-text field, which reaches the
+container as `TEST_SCENARIO`. That field accepts a **profile** name:
+
+```
+TEST_SCENARIO = short
+```
+
+Historically `TEST_SCENARIO` selected a *plan* (`scenarios/<name>.jmx`) and
+nothing else. Typing a profile name into it was therefore quietly wrong:
+`short` matched no plan, fell back to `bng-perf`, left the profile at its default,
+and ran the full ~18-minute `standard` suite — with nothing but a `WARNING` on
+stderr to say so. It now accepts either, and says which it understood:
+
+```
+▸ TEST_SCENARIO='short' names a profile rather than a plan —
+  running the 'short' profile against bng-perf.jmx
+```
+
+An unknown value still falls back rather than failing the run — the base image
+bakes `ENV TEST_SCENARIO=test` for its own sample plan, and a stale placeholder
+must never break a task — but it now names both the plans and the profiles it
+knows, so a typo is obvious.
+
+`TEST_SCENARIO` is the **only** knob for what runs. `PERF_PROFILE` used to be a
+second one, and two knobs for one decision means whichever loses is a setting
+that silently does nothing — a `PERF_PROFILE` left on a task from an earlier run
+would have quietly beaten what someone typed into the portal. It is now ignored,
+with a note saying so:
+
+```
+▸ NOTE: PERF_PROFILE='short' is ignored — the run is chosen by TEST_SCENARIO alone.
+        Use TEST_SCENARIO=short instead.
+```
+
+#### How the profile differs from every other ladder
+
+| | `standard` ladders | `short` |
+| --- | --- | --- |
+| Pass rule | `Status 200` | `Status 200 or 503` |
+| Step shape | N threads looping for a window | one simultaneous burst of N |
+| What ends a step | the window (a stopwatch) | its loop count (the work) |
+| Run length | fits a 20-minute budget | truncated by a 300 s cutoff |
+| Preamble | home / list / create / probe / size ramp | none |
+
+The **burst** is the part that matters. A closed loop is the wrong instrument
+here: a refused request returns in about a second and a served one can take
+twenty, so refused threads re-fire twenty times faster and the load actually
+offered climbs with the refusal rate — "N users" stops meaning "N in flight" at
+exactly the moment it must. A JMeter **Synchronizing Timer** holds all N threads
+at a gate and releases them together, and because a thread only reaches the gate
+after its previous request returned, the gate also drains the previous round.
+
+The **cutoff** is what makes it schedulable. Steps are loop-count driven, so a
+step ends when its burst does and the window above it is only a safety net —
+which is what lets a saturation ladder live in a plan whose every other step is
+duration-driven. `phasesWithinCutoff` then keeps the contiguous prefix that fits
+300 s, and the rest simply never run.
+
+That is why the ladder lists rungs it usually cannot reach, `xlarge` included.
+**The ladder climbs, so the knee is near the bottom** — everything a cutoff
+removes is past-saturation detail whose shape is already established.
+Truncation degrades gracefully here in a way it would not for a latency ladder.
+
+The default mix spends its five minutes on **contiguous rungs for `normal` and
+`busy`** (8/10/12/14/16), because those were the two sizes whose brackets were
+too wide to quote — `normal` first refused at 24 on one run and at 16 on the
+next. `large` needs less: every run put it at clear-at-4, refused-at-6.
+
+The cost is that `xlarge` no longer runs at all under the default cutoff, so a
+default run establishes **no upper bound for the largest file**. Raise
+`cutoffSeconds` to buy it back.
+
+#### Seeing the knee in the JMeter dashboard
+
+Two built-in views show it, and the run's own summary points at both:
+
+* **Statistics table** (dashboard index) — one row per sampler, and every rung
+  is its own sampler, so its `Error %` column **is** the refusal rate per burst
+  size per file size. Read it down the page; the knee is where it stops being 0.
+* **Codes Per Second** (Charts → Throughput) — each response code as its own
+  time series, so the 503 line appearing is the moment the service began
+  shedding. Read it against the phase schedule to attribute it to a rung.
+
+**Response Time Distribution** is a useful secondary: refusals cluster around a
+second while served requests sit far to the right, so a saturating run is
+visibly bimodal.
+
+What the dashboard cannot draw is refusal-rate against burst-size as a curve,
+one line per file size. There is no per-label error chart and the report
+generator's custom graphs will not express it — that shape lives only in the
+summary table above.
+
+##### Why a saturate run looks red, on purpose
+
+JMeter fails a sampler by **response code**, before assertions run, and a
+passing assertion cannot un-fail it. So every refusal is a KO and a saturate run
+reports something like 16% errors for a service behaving exactly as designed.
+
+That is deliberate. JMeter's "Ignore Status" (`assume_success`) would make the
+run green — and empty the `Error %` column, which is the single clearest picture
+of the knee the dashboard produces. A run with it enabled reported **0.00%
+errors while shedding load on a third of its rungs**. Visibility wins: a red
+run that shows where the service saturates beats a green one that hides it.
+
+This is already the suite's norm rather than a new exception — the project-list
+group is *red by design*, and `entrypoint.sh` states that the dashboard, not the
+task exit code, is the source of truth. The exit code is 0 either way.
+
+#### The one thing that must never be misread
+
+A rung that did not run and a rung that refused nothing look identical in a
+table of what *was* measured, and reading one as the other publishes capacity
+that was never tested. So the summary names both, and distinguishes them:
+
+```
+  NOT MEASURED — past the 300s cutoff, never attempted:
+    xlarge @ burst of 4, xlarge @ burst of 6
+
+  NOT MEASURED — scheduled but produced NO samples. This is a
+  problem, not a truncation: check staging supplied an uploadId for
+  the size, and that the rung had time to finish its burst.
+    large @ burst of 2
+```
+
+The first is expected. The second means staging failed or a burst was cut off,
+and it would otherwise be invisible.
+
+To buy the rungs the default cutoff cannot reach, raise `cutoffSeconds` on the
+`short` profile in `scenarios/ladders.config.mjs` and regenerate — the ladder
+already lists them. It is a generation-time decision, not a run-time one,
+because the truncated phase list is baked into the committed `ladders.sh` that
+`entrypoint.sh` sources:
+
+```sh
+npm run gen-scenario && npm run check-scenario
+```
 
 ## Local Testing with LocalStack
 

@@ -151,6 +151,54 @@ export const LADDERS = [
     targetSamples: 12
   },
   {
+    key: 'saturate',
+    /**
+     * Where the service starts REFUSING work, rather than how fast it does it.
+     *
+     * Every other ladder in this file is calibrated to sit below the knee and
+     * asserts `Status 200`, so a 503 is a run failure. This one is the opposite
+     * question — it climbs deliberately past the point where the validator
+     * sheds load, and a 503 is the DATA rather than a failure.
+     *
+     * ── Why this one is BURST driven ─────────────────────────────────────────
+     *
+     * Every other ladder is a closed loop: N threads each looping for a window.
+     * That is the wrong instrument here, because a refused request comes back
+     * in about a second while a served one can take twenty — so refused threads
+     * re-fire twenty times faster and the load actually offered climbs with the
+     * refusal rate. "N users" would stop meaning "N in flight" at exactly the
+     * moment it has to mean it.
+     *
+     * So a step here is ONE BURST: a Synchronizing Timer holds all N threads at
+     * a gate, releases them together, and the loop count is `bursts` rather
+     * than -1. The window becomes a SAFETY NET rather than the mechanism — the
+     * group ends when its loops do.
+     *
+     * ── Why one burst per rung is enough ─────────────────────────────────────
+     *
+     * A rung produces `users x bursts` samples, so the cheap low rungs produce
+     * the fewest. That is the right way round: a low rung is expected to refuse
+     * NOTHING, and a handful of samples confirms a zero. The rungs where the
+     * refusal rate is a real number are the wide ones, and those are exactly
+     * the rungs with plenty of samples.
+     */
+    title: 'Saturation — where the service starts refusing',
+    perSize: true,
+    burst: true,
+    bursts: 1,
+    sizes: {
+      // Steps bracket the knee as measured on a 2-vCPU box (normal 10-16,
+      // large 4-6). The pool clamps to availableParallelism() - 1, so that box
+      // ran ONE worker; a CDP task with more cores runs the default 2 and the
+      // knee moves up. Hence steps well past the local numbers rather than
+      // tight around them.
+      normal: { steps: [4, 8, 10, 12, 14, 16, 24], secondsPerBurst: 7 },
+      busy: { steps: [4, 8, 10, 12, 14, 16], secondsPerBurst: 9 },
+      large: { steps: [2, 4, 6, 8, 12], secondsPerBurst: 17 },
+      xlarge: { steps: [2, 3, 4, 6], secondsPerBurst: 31 }
+    }
+  },
+  {
     key: 'editContention',
     /**
      * The same PUT, with every thread aimed at ONE project.
@@ -238,6 +286,88 @@ export const PROFILES = {
     mixedSeconds: 120,
     targetScale: 1,
     sizeRampLoops: { normal: 20, busy: 8, large: 3, xlarge: 2 }
+  },
+  short: {
+    /**
+     * Named for what it COSTS rather than what it does, because the name is
+     * typed into the CDP portal's one text field and a short name is a name
+     * people get right. What it does is in `description`, which the banner and
+     * ladders.sh both print, so a run always says which question it answered.
+     */
+    description:
+      'SATURATION — the saturation ladder only, climbing past the knee until a five-minute cutoff stops it',
+    /**
+     * A CUTOFF, not a budget, and the difference is the point.
+     *
+     * `budgetMinutes` is a promise the profile keeps: a test fails if the
+     * standard profile projects over it, so a step that will not fit forces a
+     * decision here. This profile makes no such promise. Its ladder lists more
+     * than five minutes can do on purpose, and `phasesWithinCutoff` truncates
+     * it — so it has no budget to check, and the cutoff is what bounds the run.
+     *
+     * Five minutes because that is what makes this schedulable next to a
+     * twenty-minute standard run without competing with it, and because the
+     * knee is found in the first minute or two: the rungs a cutoff removes are
+     * the ones whose answer is already known.
+     */
+    budgetMinutes: null,
+    cutoffSeconds: 300,
+    /**
+     * No home page, no project list, no create load, no background probe, no
+     * size ramp. All of those exist to give the standard run its context, and
+     * here they would be 55 s of a 300 s budget spent measuring something this
+     * profile is not asking about — and load on the service while it does it,
+     * which for a saturation test is contamination rather than context.
+     */
+    preamble: false,
+    ladders: {
+      journey: {},
+      revalidate: {},
+      pi: {},
+      edit: {},
+      editContention: [],
+      /**
+       * Weighted so the run REACHES xlarge, rather than simply listing it.
+       *
+       * The cutoff keeps a contiguous prefix, so a profile that asked for every
+       * rung of every size would spend its whole five minutes on `normal` and
+       * `busy` and never attempt the two sizes most likely to be refused. The
+       * cheap sizes are therefore thinned here — they knee highest and cost
+       * least to re-run — and `large` and `xlarge` keep the rungs that bracket
+       * their knee.
+       *
+       * The ladder above still lists the full step set. Raising this profile's
+       * `cutoffSeconds` and regenerating is what buys those extra rungs; this
+       * mix is what fits in the default five minutes.
+       */
+      saturate: {
+        /**
+         * Weighted for a QUOTABLE knee on the two sizes whose brackets were too
+         * wide to be useful, at the cost of reach at the top.
+         *
+         * Measured (2-vCPU box, 1 worker): `large` came back clear-at-4,
+         * refused-at-6 on every run, so its bracket is already tight. `normal`
+         * and `busy` were not: `normal` first refused at 24 on one run and at
+         * 16 on the next, and `busy` had nothing between a clean 8 and a 44%
+         * 16. Contiguous rungs at 10/12/14 turn "somewhere between 8 and 16"
+         * into a number.
+         *
+         * The cost is real and is the reason this is a deliberate trade rather
+         * than a free improvement: four extra rungs push `large`'s widest rung
+         * and ALL of `xlarge` past the 300 s cutoff, so this run establishes no
+         * upper bound for the biggest file. Raising `cutoffSeconds` is what buys
+         * both — see phasesWithinCutoff.
+         */
+        normal: [8, 10, 12, 14, 16, 24],
+        busy: [8, 10, 12, 14, 16],
+        large: [2, 4, 6, 8],
+        xlarge: [2, 3, 4, 6]
+      }
+    },
+    fetchRamp: false,
+    mixedSeconds: 0,
+    targetScale: 1,
+    sizeRampLoops: { normal: 0, busy: 0, large: 0, xlarge: 0 }
   }
 }
 
@@ -301,19 +431,76 @@ export function sizeRampWindowSeconds(profileName) {
  * schedule.
  */
 export function generatedBlockStartSeconds(profileName) {
+  // A profile with no preamble ZEROES the three phases rather than skipping the
+  // arithmetic, because entrypoint.sh derives the same figure by accumulating
+  // the same terms — and it still pays both gaps, since a phase set to zero
+  // still has a boundary either side of it. Short-circuiting to a different
+  // number here would put the generator and the shell 5 s out of step, and a
+  // test asserts they agree.
+  const noPreamble = PROFILES[profileName].preamble === false
   return (
-    EVERYDAY_PHASE_SECONDS +
+    (noPreamble ? 0 : EVERYDAY_PHASE_SECONDS) +
     DEFAULT_PHASE_GAP_SECONDS +
-    PROBE_BASELINE_SECONDS +
+    (noPreamble ? 0 : PROBE_BASELINE_SECONDS) +
     sizeRampWindowSeconds(profileName) +
     DEFAULT_PHASE_GAP_SECONDS
   )
 }
 
+/**
+ * The phases a profile can actually fit inside its cutoff, in order.
+ *
+ * A profile with no `cutoffSeconds` runs everything it lists, which is how
+ * every profile behaved before this existed — the standard profile is sized to
+ * fit its budget, and a step that would not fit is a decision to take in this
+ * file rather than something to discover at run time.
+ *
+ * `short` is deliberately the other way round. Its ladder LISTS more than a
+ * five-minute run can do, up to and including `xlarge`, and the cutoff decides
+ * how far up it actually gets. That is the right shape for a saturation test
+ * for one specific reason: the ladder climbs, so the knee is near the BOTTOM,
+ * and everything a cutoff removes is past-saturation detail whose shape is
+ * already established. Truncation degrades gracefully here in a way it would
+ * not for a latency ladder.
+ *
+ * A contiguous PREFIX is kept — the loop stops at the first step that does not
+ * fit rather than skipping it and taking a cheaper one later. Skipping would
+ * quietly reorder the staircase and produce a `xlarge` rung with no `large`
+ * rungs beneath it to read it against.
+ *
+ * Steps that do not fit are simply absent: no thread group runs, so they
+ * produce no samples, and summarise-run.mjs reports them as NOT MEASURED. That
+ * distinction is load-bearing — a rung with no samples read as "nothing was
+ * refused" would claim capacity that was never tested.
+ */
+export function phasesWithinCutoff(profileName) {
+  const profile = PROFILES[profileName]
+  const all = profilePhases(profileName)
+  if (!profile.cutoffSeconds) {
+    return all
+  }
+  const kept = []
+  let cursor = generatedBlockStartSeconds(profileName)
+  for (const phase of all) {
+    if (cursor + phase.window > profile.cutoffSeconds) {
+      break
+    }
+    kept.push(phase)
+    cursor += phase.window + phase.gap
+  }
+  return kept
+}
+
+/** Steps a profile lists but cannot reach inside its cutoff. */
+export function phasesBeyondCutoff(profileName) {
+  const kept = new Set(phasesWithinCutoff(profileName).map((phase) => phase.key))
+  return profilePhases(profileName).filter((phase) => !kept.has(phase.key))
+}
+
 /** The whole run, end to end, under a profile's own defaults. */
 export function runSeconds(profileName) {
   const scheduled = scheduleFrom(
-    profilePhases(profileName),
+    phasesWithinCutoff(profileName),
     generatedBlockStartSeconds(profileName)
   )
   return scheduled.length
@@ -344,6 +531,22 @@ export const DEFAULT_PROFILE = 'standard'
  */
 export const PHASE_GAP_BOUNDS = { minSeconds: 1, maxSeconds: 5 }
 
+/**
+ * The per-step time allowance a ladder works in, whichever kind it is.
+ *
+ * A closed-loop ladder is priced per iteration, a burst ladder per burst. Both
+ * answer the same question for the caller — "roughly how long is one unit of
+ * work here" — which is what the drain gap is derived from.
+ */
+export function stepAllowanceSeconds(ladder, size) {
+  if (ladder.burst) {
+    return ladder.sizes[size].secondsPerBurst
+  }
+  return ladder.perSize
+    ? ladder.sizes[size].secondsPerIteration
+    : ladder.secondsPerIteration
+}
+
 /** The gap after a phase whose iterations cost `secondsPerIteration`. */
 export function phaseGapSeconds(secondsPerIteration) {
   return Math.min(
@@ -371,6 +574,9 @@ const PERCENT = 100
  * wait out each iteration in turn, and the top of the ladder lands on the floor.
  */
 export function windowSeconds({ ladder, size, users }, targetScale = 1) {
+  if (ladder.burst) {
+    return burstWindowSeconds({ ladder, size })
+  }
   const perIteration = ladder.perSize
     ? ladder.sizes[size].secondsPerIteration
     : ladder.secondsPerIteration
@@ -380,6 +586,34 @@ export function windowSeconds({ ladder, size, users }, targetScale = 1) {
     WINDOW_BOUNDS.maxStepSeconds,
     Math.max(WINDOW_BOUNDS.minStepSeconds, needed)
   )
+}
+
+/**
+ * Headroom on top of a burst's own allowance, so the window is a SAFETY NET
+ * rather than the thing that ends the step.
+ *
+ * A burst step is loop-count driven: it finishes when its threads have done
+ * their bursts, and the window only bites if something has gone wrong. That
+ * distinction is the whole reason this ladder can exist inside a plan whose
+ * every other step is duration-driven — a saturating burst's duration is set by
+ * its slowest request, which is the quantity being discovered, so it cannot be
+ * predicted well enough to be a deadline. Slack makes a mis-estimate cost a few
+ * seconds of dead air instead of a truncated burst reported as a clean one.
+ */
+const BURST_SLACK_SECONDS = 5
+
+/**
+ * A burst step's window: what one burst is allowed to take, plus slack.
+ *
+ * NOT divided by `users`, which is the difference that matters. Every other
+ * window here shrinks as concurrency climbs, because N threads in a closed loop
+ * produce samples N times faster. A burst is one simultaneous round no matter
+ * how wide it is, so it takes as long as its slowest single request whether
+ * that round is 2 requests or 24 — and a wide round is if anything SLOWER,
+ * because the queue behind it is deeper.
+ */
+export function burstWindowSeconds({ ladder, size }) {
+  return ladder.sizes[size].secondsPerBurst * ladder.bursts + BURST_SLACK_SECONDS
 }
 
 /** The fetch ramp's window, derived from its loop counts the same way. */
@@ -419,14 +653,11 @@ export function profilePhases(profileName) {
       )
       .sort(bySizeThenUsers)
     for (const step of ordered) {
-      const perIteration = ladder.perSize
-        ? ladder.sizes[step.size].secondsPerIteration
-        : ladder.secondsPerIteration
       phases.push({
         key: stepKey(step),
         users: step.users,
         window: windowSeconds(step, profile.targetScale),
-        gap: phaseGapSeconds(perIteration)
+        gap: phaseGapSeconds(stepAllowanceSeconds(ladder, step.size))
       })
     }
   }

@@ -40,7 +40,8 @@ import {
   budgetCheck,
   generatedBlockStartSeconds,
   ladderSteps,
-  profilePhases,
+  phasesBeyondCutoff,
+  phasesWithinCutoff,
   runSeconds,
   scheduleFrom,
   sizeRampWindowSeconds,
@@ -368,6 +369,128 @@ function revalidateStep(step, defaults) {
         statusIs(CHILD),
         bodyContains(CHILD, 'Fixture actually validates', '"valid":true'),
         durationAssertion(CHILD, budget)
+      )
+    }),
+    `${IND}</hashTree>`
+  )
+}
+
+/**
+ * The gate that turns N looping threads into ONE simultaneous burst.
+ *
+ * `groupSize` 0 means "every thread in this group", which is what keeps the
+ * gate correct when the thread count arrives as a property at run time — a
+ * hard-coded size that disagreed with the thread count would either release
+ * early (no burst) or block forever (no samples).
+ *
+ * The timeout is a deadlock guard, not a pacing knob: if a thread dies the
+ * others must not wait on it for the rest of the run. It is set well above the
+ * widest burst's window so it never fires in a healthy run.
+ *
+ * `stringProp`, NOT `longProp`, for the timeout. A longProp is parsed as a
+ * literal number the moment the XML loads, so a `${__P(...)}` inside one fails
+ * the whole plan before a single sampler runs:
+ *
+ *   NumberFormatException: For input string: "${__P(saturateGateTimeoutMs,120000)}"
+ *
+ * A stringProp defers it to run time, where JMeter's TestBean coercion turns
+ * the substituted text into the long the bean wants. That is why every other
+ * property-driven number in this plan is a stringProp — ConstantTimer.delay
+ * included — and it is the reason a plan can only be trusted once JMeter has
+ * actually loaded it. `groupSize` stays an intProp because it is a literal.
+ */
+function syncTimer(indent) {
+  return `${indent}<SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
+${indent}  <intProp name="groupSize">0</intProp>
+${indent}  <stringProp name="timeoutInMs">\${__P(saturateGateTimeoutMs,120000)}</stringProp>
+${indent}</SyncTimer>
+${indent}<hashTree/>`
+}
+
+/**
+ * One saturation step: N threads released together, once, past the knee.
+ *
+ * Three things differ from every other validate step in the plan, and all three
+ * are the point rather than an omission:
+ *
+ *   - the status assertion accepts 200 OR 503, because a 503 here is the
+ *     MEASUREMENT. The plan already makes this move once, for the 409 the edit
+ *     contention ladder is built to provoke;
+ *   - there is no duration assertion. A refused request returns in about a
+ *     second and a served one can take twenty, so any single budget would
+ *     either fail the served requests or pass everything;
+ *   - there is no `"valid":true` body check, because a 503 body carries
+ *     `valid:false` by construction.
+ */
+function saturateStep(step, defaults) {
+  const key = stepKey(step)
+  const ladder = ladderByKey('saturate')
+  // "burst of N" rather than "N user(s)": every other row in the report is a
+  // sustained concurrency, and reading this one the same way would overstate
+  // it — this is one simultaneous round, not N users for a window.
+  const label = `saturation: burst of ${step.users} on one ${step.size} upload`
+  return lines(
+    threadGroup({
+      name: `Saturation (${step.size}) @ burst of ${step.users}`,
+      key,
+      defaults,
+      // Loop-count driven: the group ends when its bursts are done, and the
+      // window above it is only a safety net. Every other ladder step is the
+      // other way round.
+      loops: ladder.bursts,
+      comment:
+        `${step.users} thread(s) released TOGETHER against one pre-staged ${step.size}\n` +
+        'upload, climbing deliberately past the point where the validator starts\n' +
+        'refusing. A 503 is the data here, not a failure: it carries\n' +
+        'VALIDATION_BUSY and means the file was never looked at.\n\n' +
+        'The reason it was refused (no_capacity | queue_full | queue_wait |\n' +
+        'memory_budget) is NOT on the wire — read the GeoPackageValidationBusy\n' +
+        'metric, or grep the backend log for "validation refused as busy".'
+    }),
+    `${IND}<hashTree>`,
+    backendDefaults(BODY),
+    authHeaders(BODY),
+    csvDataSet(BODY, {
+      name: 'Project id pool',
+      fileProp: 'projectsCsv',
+      fileDefault: '/opt/perftest/stage/projects.csv',
+      variables: 'projectId'
+    }),
+    syncTimer(BODY),
+    jsonSampler(BODY, {
+      name: label,
+      path: `/baseline/validate/\${__P(uploadId_${step.size},)}`,
+      method: 'POST',
+      body: '{"projectId":"${projectId}"}',
+      timeoutProp: 'validateResponseTimeoutMs',
+      timeoutDefault: TIMEOUT_DEFAULTS.validate,
+      children: lines(
+        responseAssertion(CHILD, {
+          name: 'Status 200 or 503 (503 is the load shed, not a failure)',
+          field: 'Assertion.response_code',
+          testType: ASSERT_MATCHES,
+          values: ['200|503']
+        })
+        // No "Ignore Status" here, deliberately, and it is worth saying why
+        // because the opposite looks tidier.
+        //
+        // A sampler is failed by RESPONSE CODE before any assertion runs, and a
+        // passing assertion cannot un-fail it — assertions only ever fail a
+        // sample. So every refusal counts as a KO, and a saturate run reports
+        // something like 16% errors for a service behaving exactly as designed.
+        // Setting assume_success would clear that and make the run look green.
+        //
+        // It would also make the report useless. The dashboard's Statistics
+        // table is one row per sampler, and each rung here is its own sampler —
+        // so its `Error %` column IS the refusal rate per burst size per file
+        // size, which is the clearest picture of the knee that JMeter produces
+        // on its own. Marking the 503s successful empties that column: a run
+        // with assume_success on reported 0.00% errors while shedding load on
+        // a third of its rungs.
+        //
+        // A red-looking run is already this suite's normal — the list group is
+        // "red by design", and entrypoint.sh states that the dashboard, not the
+        // exit code, is the source of truth. Visibility wins over tidiness.
       )
     }),
     `${IND}</hashTree>`
@@ -859,6 +982,8 @@ function renderLadders(defaults) {
         blocks.push(editStep(step, { contention: false }, defaults))
       } else if (ladder.key === 'editContention') {
         blocks.push(editStep(step, { contention: true }, defaults))
+      } else if (ladder.key === 'saturate') {
+        blocks.push(saturateStep(step, defaults))
       } else {
         throw new Error(`gen-scenario has no renderer for ladder "${ladder.key}"`)
       }
@@ -918,7 +1043,8 @@ function renderLaddersSh() {
   ]
 
   for (const [name, profile] of Object.entries(PROFILES)) {
-    const phases = profilePhases(name)
+    const phases = phasesWithinCutoff(name)
+    const skipped = phasesBeyondCutoff(name)
     const budget = budgetCheck(name)
     out.push(`# ── ${name} — ${profile.description}`)
     out.push(
@@ -928,6 +1054,16 @@ function renderLaddersSh() {
           : ', no budget')
     )
     out.push(`PROFILE_BUDGET_SECONDS_${name}=${budget ? budget.limitSeconds : 0}`)
+    // 0 disables the preamble: the everyday groups, the quiet probe and the
+    // size ramp. A saturation run wants none of them — they would be load on
+    // the service while it is being measured, not context for the measurement.
+    out.push(`PROFILE_PREAMBLE_${name}=${profile.preamble === false ? 0 : 1}`)
+    out.push(`PROFILE_CUTOFF_SECONDS_${name}=${profile.cutoffSeconds ?? 0}`)
+    // Rungs the profile lists but the cutoff cannot reach. Emitted so the run
+    // can SAY they were not measured; a rung silently absent from the results
+    // reads as a rung that refused nothing, which would claim capacity that was
+    // never tested.
+    out.push(`PROFILE_SKIPPED_${name}="${skipped.map((phase) => phase.key).join(' ')}"`)
     out.push(`PROFILE_PLAN_SECONDS_${name}=${runSeconds(name)}`)
     out.push(`PROFILE_PHASES_${name}="${phases.map((p) => p.key).join(' ')}"`)
     for (const phase of phases) {
@@ -978,7 +1114,7 @@ function allPhaseKeys() {
  */
 function defaultsForJmx() {
   const scheduled = scheduleFrom(
-    profilePhases(DEFAULT_PROFILE),
+    phasesWithinCutoff(DEFAULT_PROFILE),
     generatedBlockStartSeconds(DEFAULT_PROFILE)
   )
   const byKey = new Map(scheduled.map((phase) => [phase.key, phase]))

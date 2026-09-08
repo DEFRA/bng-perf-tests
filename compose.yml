@@ -43,6 +43,10 @@ services:
     environment:
       S3_ENDPOINT: 'http://localstack:4566'
       RESULTS_OUTPUT_S3_PATH: 's3://test-results'
+      # The CDP portal's one text field, and the ONLY knob for what runs. Takes
+      # a profile name (standard | short) or a plan name.
+      #
+      #   TEST_SCENARIO=short docker compose up --build
       TEST_SCENARIO: ${TEST_SCENARIO:-bng-perf}
       ENVIRONMENT: ${ENVIRONMENT:-local}
       # The plan hits BOTH the frontend (home page) and the authenticated backend
@@ -57,6 +61,11 @@ services:
       FRONTEND_PORT: ${FRONTEND_PORT:-3000}
       BACKEND_PORT: ${BACKEND_PORT:-3001}
       STUB_BASE_URL: ${STUB_BASE_URL:-http://host.docker.internal:3200/cdp-defra-id-stub}
+      # The stub copies this request's Host header into the token's `iss`, and the
+      # backend only trusts the issuer its own discovery named. From in here the
+      # stub is host.docker.internal; to the backend on the host it is localhost.
+      # Without this every request 401s with "Invalid bearer token".
+      STUB_ISSUER_HOST: ${STUB_ISSUER_HOST:-localhost:3200}
       # Upload staging POSTs the fixtures to the CDP Uploader, which runs in the
       # backend's compose on the HOST. entrypoint.sh defaults this to
       # localhost:7337 when ENVIRONMENT=local, which is right for a process on the
@@ -65,10 +74,9 @@ services:
       # every other target above.
       CDP_UPLOADER_URL: ${CDP_UPLOADER_URL:-http://host.docker.internal:7337}
       SERVICE_URL_SCHEME: ${SERVICE_URL_SCHEME:-http}
-      # `standard` is the only profile (~18 min of plan). Use
-      # PERF_DUMP_SCHEDULE=true to see its schedule without running it, and the
-      # per-phase env knobs in the README to narrow a run.
-      PERF_PROFILE: ${PERF_PROFILE:-standard}
+      # No PERF_PROFILE: TEST_SCENARIO above is the only knob, exactly as on CDP.
+      # PERF_DUMP_SCHEDULE=true shows a schedule without running it, and the
+      # per-phase env knobs in the README narrow a run.
       PERF_DUMP_SCHEDULE: ${PERF_DUMP_SCHEDULE:-}
     networks:
       - performance-tests

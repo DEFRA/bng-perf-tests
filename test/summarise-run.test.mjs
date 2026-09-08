@@ -103,6 +103,28 @@ function buildResults() {
     add('mixed: list my projects (GET /projects)', 150, '200', 'Mixed 1-1')
   }
 
+  // The saturation ladder: a clean climb, then refusals. `normal` stays clear
+  // throughout; `large` refuses from a burst of 4 up, so the two knee shapes the
+  // report has to distinguish are both present.
+  for (const [size, base, rungs] of [
+    ['normal', 800, [[8, 0], [16, 0], [24, 0]]],
+    ['large', 6000, [[2, 0], [4, 2], [6, 5], [8, 7]]]
+  ]) {
+    for (const [burst, refused] of rungs) {
+      for (let i = 0; i < burst; i++) {
+        const busy = i < refused
+        add(
+          `saturation: burst of ${burst} on one ${size} upload`,
+          // A refusal returns fast; a served request does not. The summary must
+          // not average the two together.
+          busy ? 900 : base + burst * 30,
+          busy ? '503' : '200',
+          `Saturation (${size}) @ burst of ${burst} 1-${i + 1}`
+        )
+      }
+    }
+  }
+
   // The probe spans the whole run, so every phase gets a "during" row.
   const start = rows[0][0]
   for (let ts = start; ts < now; ts += 1500) {
@@ -143,6 +165,7 @@ describe('every group reports', () => {
     ['project fetch', 'What does fetching a whole project cost'],
     ['mixed workload', 'What does the mixed workload look like'],
     ['edit contention', 'edit the SAME project at once'],
+    ['saturation', 'start REFUSING uploads'],
     ['probe', 'What an ordinary user experienced at the same time']
   ]
   for (const [name, heading] of sections) {
@@ -178,6 +201,159 @@ describe('the journey ladder', () => {
       'large:1',
       'large:3'
     ])
+  })
+})
+
+/**
+ * Just the saturation table and verdict.
+ *
+ * Bounded by the NEXT section's underline rather than by a known heading: the
+ * ramp-coverage table further down also has a row starting `large`, with three
+ * columns instead of eight, and letting it leak in here makes this test assert
+ * against the wrong numbers.
+ */
+function saturationSection(text) {
+  const lines = text.split('\n')
+  const start = lines.findIndex((line) => line.includes('start REFUSING uploads?'))
+  if (start === -1) {
+    return ''
+  }
+  // start + 1 is this section's own underline, so look past it for the next.
+  let end = lines.length
+  for (let i = start + 2; i < lines.length; i++) {
+    if (/^─+$/.test(lines[i])) {
+      end = i - 1
+      break
+    }
+  }
+  return lines.slice(start, end).join('\n')
+}
+
+describe('the saturation ladder', () => {
+  test('counts 503s as a refusal rate rather than as failures', () => {
+    // The same call the contention section makes for 409s. A 503 here means the
+    // validator shed the request on purpose; counting it as a failure would
+    // report correct load-shedding as a broken service.
+    assert.match(output, /Where does the service start REFUSING uploads\?/)
+    assert.match(output, /503 busy/)
+    assert.match(output, /refused/)
+  })
+
+  test('names the knee per size, and only where there is one', () => {
+    // large refuses from a burst of 4, so its clear-to is the rung below.
+    assert.match(output, /large: clear to a burst of 2; first refusal at 4\./)
+    // normal never refused on this ladder, and must not be given a made-up knee.
+    assert.match(output, /normal: nothing refused on this ladder/)
+  })
+
+  test('latency covers the SERVED requests only', () => {
+    // The refusals in the fixture return in 900ms and the served large requests
+    // take 6s+. If refusals were folded in, the worst-case column for the most
+    // saturated rung would collapse toward the refusal time and the rung would
+    // read as FASTER than the clean one below it.
+    // Scoped to the saturation section: `large` also names a row in the size
+    // ramp and journey tables, and those have different columns entirely.
+    const rows = saturationSection(output)
+      .split('\n')
+      .filter((line) => /^\s+large\s+\d+/.test(line))
+      .map((line) => line.trim().split(/\s+/))
+    assert.ok(rows.length >= 2, 'expected several large rungs in the table')
+    for (const row of rows) {
+      // size, burst, sent, served, 503 busy, refused%, p95, worst
+      const [, , sent, served, busy] = row
+      assert.equal(Number(sent), Number(served) + Number(busy))
+    }
+    // Every served large request took at least 6s, so no rung may report a
+    // sub-second p95 — which is what averaging refusals in would produce.
+    for (const row of rows) {
+      const p95 = row[6]
+      assert.match(p95, /s$/, `p95 ${p95} looks like a refusal, not a served request`)
+    }
+  })
+
+  test('says which refusal reason to go and look up', () => {
+    // The 503 body deliberately does not carry it, so a report that did not
+    // point at the metric would leave the actionable half of the finding out.
+    assert.match(output, /GeoPackageValidationBusy/)
+    assert.match(output, /no_capacity \| queue_full \| queue_wait \| memory_budget/)
+  })
+})
+
+describe('rungs that were never measured', () => {
+  /**
+   * The most dangerous mistake this report could make.
+   *
+   * A saturation ladder is truncated on purpose, so rungs are routinely absent
+   * from the results — and in a table of what WAS measured, an absent rung and
+   * a rung that refused nothing look identical. Reading one as the other
+   * publishes capacity that was never tested, which is precisely the number
+   * someone would size a service on.
+   */
+  let partial = ''
+
+  before(() => {
+    const rows = [HEADERS]
+    let now = 1_700_000_000_000
+    // Only the three `normal` rungs produced anything.
+    for (const burst of [8, 16, 24]) {
+      for (let i = 0; i < burst; i++) {
+        rows.push([
+          now,
+          800,
+          `saturation: burst of ${burst} on one normal upload`,
+          '200',
+          'true',
+          `Saturation (normal) @ burst of ${burst} 1-${i + 1}`
+        ])
+        now += 820
+      }
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'bng-perf-unmeasured-'))
+    const csv = join(dir, 'results.csv')
+    writeFileSync(csv, rows.map((r) => r.join(',')).join('\n') + '\n')
+    partial = execFileSync(
+      process.execPath,
+      [join(ROOT, 'scripts', 'summarise-run.mjs'), csv],
+      { cwd: ROOT, encoding: 'utf8', env: { ...process.env, PERF_PROFILE: 'short' } }
+    )
+  })
+
+  test('a rung the cutoff never reached is named, not silently dropped', () => {
+    assert.match(partial, /NOT MEASURED — past the 300s cutoff, never attempted/)
+    assert.match(partial, /xlarge @ burst of 4/)
+  })
+
+  test('a rung that ran but produced nothing is called out as a PROBLEM', () => {
+    // Distinct from the cutoff case on purpose: this one means staging failed
+    // or the window cut the burst off, and it would otherwise be invisible.
+    assert.match(partial, /scheduled but produced NO samples\. This is a/)
+    assert.match(partial, /large @ burst of 2/)
+  })
+
+  test('a rung that DID report is not listed as unmeasured', () => {
+    const notes = partial.slice(partial.indexOf('NOT MEASURED'))
+    assert.doesNotMatch(notes, /normal @ burst of (8|16|24)/)
+  })
+
+  test('says nothing at all when no profile is named', () => {
+    // Someone summarising a JTL by hand has no ladder to compare against, and
+    // guessing at one would invent rungs the run never listed.
+    const dir = mkdtempSync(join(tmpdir(), 'bng-perf-noprofile-'))
+    const csv = join(dir, 'results.csv')
+    writeFileSync(
+      csv,
+      [HEADERS, [1_700_000_000_000, 800, 'saturation: burst of 8 on one normal upload', '200', 'true', 't1-1']]
+        .map((r) => r.join(','))
+        .join('\n') + '\n'
+    )
+    const env = { ...process.env }
+    delete env.PERF_PROFILE
+    const out = execFileSync(
+      process.execPath,
+      [join(ROOT, 'scripts', 'summarise-run.mjs'), csv],
+      { cwd: ROOT, encoding: 'utf8', env }
+    )
+    assert.doesNotMatch(out, /NOT MEASURED/)
   })
 })
 
