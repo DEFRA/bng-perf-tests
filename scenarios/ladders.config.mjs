@@ -288,9 +288,15 @@ export const PROFILES = {
     targetScale: 1,
     sizeRampLoops: { normal: 20, busy: 8, large: 3, xlarge: 2 }
   },
-  saturate: {
+  short: {
+    /**
+     * Named for what it COSTS rather than what it does, because the name is
+     * typed into the CDP portal's one text field and a short name is a name
+     * people get right. What it does is in `description`, which the banner and
+     * ladders.sh both print, so a run always says which question it answered.
+     */
     description:
-      'the saturation ladder only — climbs past the knee until a five-minute cutoff stops it',
+      'SATURATION — the saturation ladder only, climbing past the knee until a five-minute cutoff stops it',
     /**
      * A CUTOFF, not a budget, and the difference is the point.
      *
@@ -439,7 +445,7 @@ export function generatedBlockStartSeconds(profileName) {
  * fit its budget, and a step that would not fit is a decision to take in this
  * file rather than something to discover at run time.
  *
- * `saturate` is deliberately the other way round. Its ladder LISTS more than a
+ * `short` is deliberately the other way round. Its ladder LISTS more than a
  * five-minute run can do, up to and including `xlarge`, and the cutoff decides
  * how far up it actually gets. That is the right shape for a saturation test
  * for one specific reason: the ladder climbs, so the knee is near the BOTTOM,

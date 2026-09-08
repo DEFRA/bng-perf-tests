@@ -698,7 +698,7 @@ run is meaningless.
 
 | Env var                          | Default                                        | Purpose                                                        |
 | -------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
-| `TEST_SCENARIO`                  | `bng-perf`                                     | The CDP portal's single text field. Accepts a **profile** name (`saturate`) or a plan name; unset runs the whole suite at `standard`. |
+| `TEST_SCENARIO`                  | `bng-perf`                                     | The CDP portal's single text field. Accepts a **profile** name (`short`) or a plan name; unset runs the whole suite at `standard`. |
 | `UPLOAD_SIZES`                   | `normal:80,busy:800,large:5000,xlarge:12000` | How big each step is. `label:parcels` pairs — the **labels are fixed**, see below. |
 | `STAGE_UPLOADS`                  | `true` for this plan                           | `false` skips staging *and* every phase that needed it.         |
 | `CDP_UPLOADER_URL`               | `https://cdp-uploader.<ENVIRONMENT>.cdp-int.defra.cloud` | The uploader to POST staged files to.                 |
@@ -1060,7 +1060,7 @@ grep "validation refused as busy" <backend log>
 
 or slice `GeoPackageValidationBusy` by `reason` in CloudWatch.
 
-### The probe and the `saturate` profile
+### The probe and the `short` profile
 
 There are two ways to get this number, and they have different jobs.
 
@@ -1068,13 +1068,25 @@ The **probe** is the instrument. It iterates in seconds, needs nothing but Node,
 fires an exact burst and waits for it to finish however long that takes, and
 exits non-zero with `--expect-clear-to` so CI can guard the figure.
 
-The **`saturate` JMeter profile** answers the same question inside the suite, so
+The **`short` JMeter profile** answers the same question inside the suite, so
 the result lands in the CDP portal like every other run. That is the one thing
 the probe cannot do.
 
 ```sh
-PERF_PROFILE=saturate ./entrypoint.sh
+PERF_PROFILE=short ./entrypoint.sh
 ```
+
+It is called `short` for what it COSTS, because that name is typed by hand into
+the portal and a short name is a name people get right. What it DOES is
+saturation — it drives the service until it starts refusing work — so every
+place the profile is announced says so:
+
+```
+  profile:  short — 11 ladder phase(s), 300s cutoff — the ladder is truncated to fit
+```
+
+If you want a quick smoke run rather than a deliberate overload, `short` is not
+it. Narrow `standard` with the per-phase env knobs instead.
 
 It is a separate profile rather than a phase of `standard` because it is a
 different question, not a different sampling depth of the same one — different
@@ -1088,18 +1100,18 @@ The portal configures a task through a single free-text field, which reaches the
 container as `TEST_SCENARIO`. That field accepts a **profile** name:
 
 ```
-TEST_SCENARIO = saturate
+TEST_SCENARIO = short
 ```
 
 Historically `TEST_SCENARIO` selected a *plan* (`scenarios/<name>.jmx`) and
 nothing else. Typing a profile name into it was therefore quietly wrong:
-`saturate` matched no plan, fell back to `bng-perf`, left `PERF_PROFILE` unset,
+`short` matched no plan, fell back to `bng-perf`, left `PERF_PROFILE` unset,
 and ran the full ~18-minute `standard` suite — with nothing but a `WARNING` on
 stderr to say so. It now accepts either, and says which it understood:
 
 ```
-▸ TEST_SCENARIO='saturate' names a profile rather than a plan —
-  running the 'saturate' profile against bng-perf.jmx
+▸ TEST_SCENARIO='short' names a profile rather than a plan —
+  running the 'short' profile against bng-perf.jmx
 ```
 
 An unknown value still falls back rather than failing the run — the base image
@@ -1109,7 +1121,7 @@ knows, so a typo is obvious. An explicit `PERF_PROFILE` beats the field.
 
 #### How the profile differs from every other ladder
 
-| | `standard` ladders | `saturate` |
+| | `standard` ladders | `short` |
 | --- | --- | --- |
 | Pass rule | `Status 200` | `Status 200 or 503` |
 | Step shape | N threads looping for a window | one simultaneous burst of N |
@@ -1156,7 +1168,7 @@ The first is expected. The second means staging failed or a burst was cut off,
 and it would otherwise be invisible.
 
 To buy the rungs the default cutoff cannot reach, raise `cutoffSeconds` on the
-`saturate` profile in `scenarios/ladders.config.mjs` and regenerate — the ladder
+`short` profile in `scenarios/ladders.config.mjs` and regenerate — the ladder
 already lists them. It is a generation-time decision, not a run-time one,
 because the truncated phase list is baked into the committed `ladders.sh` that
 `entrypoint.sh` sources:

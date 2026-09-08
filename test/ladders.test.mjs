@@ -139,7 +139,7 @@ describe('profiles', () => {
     // keeping five step lists meaningful cost more than the flexibility bought.
     // That decision still stands, and this assertion still guards it.
     //
-    // `saturate` is admitted against it on purpose, because it is not another
+    // `short` is admitted against it on purpose, because it is not another
     // depth of the same question. It asks the opposite one — where the service
     // starts REFUSING work — and answers it with a different pass rule (503 is
     // data, not failure), a different step shape (bursts, not closed loops) and
@@ -147,7 +147,7 @@ describe('profiles', () => {
     // `standard` without making `standard` mean two things.
     //
     // A THIRD entry should be a conscious decision, not an accident.
-    assert.deepEqual(Object.keys(PROFILES), ['standard', 'saturate'])
+    assert.deepEqual(Object.keys(PROFILES), ['standard', 'short'])
   })
 })
 
@@ -222,8 +222,8 @@ describe("the CDP portal's one text field", () => {
     output.split('\n').filter((line) => line.startsWith('PHASE ')).map((l) => l.split(' ')[1])
 
   test('a profile name typed into it selects that profile', () => {
-    const phases = phasesIn(run({ TEST_SCENARIO: 'saturate' }))
-    assert.ok(phases.length > 0, 'expected the saturate ladder to be scheduled')
+    const phases = phasesIn(run({ TEST_SCENARIO: 'short' }))
+    assert.ok(phases.length > 0, 'expected the saturation ladder to be scheduled')
     assert.ok(
       phases.every((key) => key.startsWith('saturate_')),
       `expected only saturation rungs, got ${phases.slice(0, 3).join(', ')}`
@@ -240,7 +240,7 @@ describe("the CDP portal's one text field", () => {
 
   test('an explicit PERF_PROFILE beats the portal field', () => {
     // Someone who set both meant the more specific knob.
-    const phases = phasesIn(run({ TEST_SCENARIO: 'saturate', PERF_PROFILE: 'standard' }))
+    const phases = phasesIn(run({ TEST_SCENARIO: 'short', PERF_PROFILE: 'standard' }))
     assert.ok(phases.some((key) => key.startsWith('journey_')))
   })
 
@@ -259,19 +259,19 @@ describe('the saturation cutoff', () => {
   test('kept and skipped together account for every listed rung', () => {
     // Nothing may go missing between the two: a rung in neither list is a rung
     // that silently never ran and was never reported as unrun.
-    const kept = phasesWithinCutoff('saturate').map((p) => p.key)
-    const skipped = phasesBeyondCutoff('saturate').map((p) => p.key)
+    const kept = phasesWithinCutoff('short').map((p) => p.key)
+    const skipped = phasesBeyondCutoff('short').map((p) => p.key)
     assert.deepEqual(
       [...kept, ...skipped].sort(),
-      profilePhases('saturate').map((p) => p.key).sort()
+      profilePhases('short').map((p) => p.key).sort()
     )
   })
 
   test('every rung it keeps actually finishes inside the cutoff', () => {
-    const cutoff = PROFILES.saturate.cutoffSeconds
+    const cutoff = PROFILES.short.cutoffSeconds
     const scheduled = scheduleFrom(
-      phasesWithinCutoff('saturate'),
-      generatedBlockStartSeconds('saturate')
+      phasesWithinCutoff('short'),
+      generatedBlockStartSeconds('short')
     )
     for (const phase of scheduled) {
       assert.ok(
@@ -285,14 +285,14 @@ describe('the saturation cutoff', () => {
     // The tempting bug is to skip an expensive rung and take a later cheap one.
     // That would silently reorder the staircase and produce, say, an xlarge rung
     // with no large rungs beneath it to read it against.
-    const all = profilePhases('saturate').map((p) => p.key)
-    const kept = phasesWithinCutoff('saturate').map((p) => p.key)
+    const all = profilePhases('short').map((p) => p.key)
+    const kept = phasesWithinCutoff('short').map((p) => p.key)
     assert.deepEqual(kept, all.slice(0, kept.length))
   })
 
   test('the run reaches xlarge, with enough rungs to bracket a knee', () => {
     // The whole point of the weighting: a single xlarge rung brackets nothing.
-    const xlarge = phasesWithinCutoff('saturate').filter((p) =>
+    const xlarge = phasesWithinCutoff('short').filter((p) =>
       p.key.startsWith('saturate_xlarge_')
     )
     assert.ok(
@@ -305,7 +305,7 @@ describe('the saturation cutoff', () => {
     // A staircase that does not climb cannot find a knee — and with a prefix
     // cutoff, an unsorted ladder would also truncate in the wrong place.
     const bySize = new Map()
-    for (const phase of phasesWithinCutoff('saturate')) {
+    for (const phase of phasesWithinCutoff('short')) {
       const size = phase.key.replace('saturate_', '').replace(/_\d+$/, '')
       bySize.set(size, [...(bySize.get(size) ?? []), phase.users])
     }

@@ -314,7 +314,7 @@ describe('rungs that were never measured', () => {
     partial = execFileSync(
       process.execPath,
       [join(ROOT, 'scripts', 'summarise-run.mjs'), csv],
-      { cwd: ROOT, encoding: 'utf8', env: { ...process.env, PERF_PROFILE: 'saturate' } }
+      { cwd: ROOT, encoding: 'utf8', env: { ...process.env, PERF_PROFILE: 'short' } }
     )
   })
 
