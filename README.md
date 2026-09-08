@@ -972,6 +972,103 @@ docker compose up --build
 * On Docker Desktop `host.docker.internal` resolves to the host natively; on Linux
   the compose file adds the `host-gateway` mapping so it resolves there too.
 
+## Finding the saturation point — `npm run saturation`
+
+Everything else in this repo is calibrated to sit **below** the knee. Every
+validate leg of every JMeter ladder asserts `Status 200`, so a 503 there is a run
+failure rather than a recorded data point. That is the right call for a suite
+whose job is to measure latency, and the wrong tool for the question *"how many
+concurrent uploads can this instance take before it starts refusing them?"*
+
+Nothing in the suite measured that. The refusal thresholds were only ever
+*derived* from the backend's config:
+
+| Ceiling | Arithmetic | At the shipped defaults |
+| --- | --- | --- |
+| Admission cap | `VALIDATION_WORKER_COUNT` + `VALIDATION_WORKER_QUEUE_LIMIT` | 2 + 8 = **10 in flight** |
+| Parse budget | `VALIDATION_PARSE_BUDGET_BYTES` ÷ (2 MB + 10 × file size) | 550 MiB ÷ 43 MB ≈ **13** for `large` |
+
+whichever binds first — so at the defaults the pool refuses before the budget
+does for everything except `xlarge`. `scripts/saturation-probe.mjs` **measures**
+it rather than inferring it.
+
+It climbs a ladder of concurrency levels, fires each level as a *simultaneous
+burst* at `/baseline/validate/{uploadId}`, and reports where 503s first appear:
+
+```bash
+# against a local stack (backend :3001, uploader :7337, stub :3200)
+npm run saturation
+
+# a specific file size, a narrower ladder, more samples per rung
+npm run saturation -- --size xlarge --ladder 2,4,5,6,8 --rounds 3
+
+# regression guard: non-zero exit unless the service is still clear to 10
+npm run saturation -- --expect-clear-to 10 --json reports/saturation.json
+
+npm run saturation -- --help
+```
+
+The file is uploaded and virus-scanned **once**, because
+`/baseline/validate/{uploadId}` re-reads the object from S3 on every call — the
+same trick `stage-uploads.mjs` plays for the `revalidate` ladder. Each request in
+a burst gets its **own project**, because concurrent writes to one project
+serialise on a row lock and would measure the lock rather than the refusal.
+`--no-project` drops the `projectId` altogether: validation then stops after the
+geometry checks, no project pool is needed, and the worker pool and parse budget
+are isolated from the database. Both are worth running — the first is the number
+a user would hit, the second is the validator's own ceiling.
+
+### Reading the output
+
+```
+users  sent  200  503 busy  503 rss  409  err  refused  inflight    p50     p95
+-----  ----  ---  --------  -------  ---  ---  -------  --------  -----  ------
+    8     8    8         0        0    0    0       0%         8  510ms  1011ms
+   10    10   10         0        0    0    0       0%        10  756ms  1256ms
+   12    12   10         2        0    0    0      17%        12  505ms  1256ms
+
+Clear to 10 concurrent; first refusal at 12.
+```
+
+* **`clear to N`** is the number to quote as capacity and to guard against — the
+  last level at which nothing was turned away. The knee lies between it and the
+  first refused rung, so **the gap between them is the measurement's error bar**;
+  narrow the ladder there to tighten it.
+* **`503 busy` vs `503 rss`** are split on the body, not the status. The first is
+  `VALIDATION_BUSY` — the validator shedding load on purpose, which is what the
+  probe is looking for. The second is Hapi's RSS limit refusing the request
+  before the route ran; at the shipped `VALIDATION_MAX_RSS_BYTES=0` it is
+  disabled, so seeing one is itself the finding.
+* **`inflight`** is the peak concurrency measured *at the client*. It is the
+  honesty check on the whole instrument: a rung labelled 24 that only ever got 9
+  requests overlapping was never offered 24, and its refusal count says nothing
+  about the service.
+* **`409`** means the probe's own project pool was too small and two requests
+  shared a project. That rung measured the row lock, not the validator.
+
+### What the probe cannot see
+
+The 503 body carries **no reason**. `no_capacity`, `queue_full`, `queue_wait` and
+`memory_budget` are deliberately kept off the wire and go to the
+`GeoPackageValidationBusy` metric and a `warn` line instead. Which of the four
+fired is the difference between "add workers" and "the files are too big for the
+budget", so attribute it from the backend side of the run:
+
+```bash
+grep "validation refused as busy" <backend log>
+```
+
+or slice `GeoPackageValidationBusy` by `reason` in CloudWatch.
+
+### Why it is not part of the JMeter run
+
+Deliberately separate. The plan's job is to measure latency under load it is
+expected to survive, and it asserts `Status 200` throughout; a phase that
+saturates on purpose would turn correct load-shedding into a red run. The probe
+is a one-off instrument you point at an environment when you want the number, or
+a guard you run with `--expect-clear-to` when you want to know the number has not
+moved.
+
 ## Local Testing with LocalStack
 
 ### Build a new Docker image
