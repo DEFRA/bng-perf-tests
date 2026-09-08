@@ -178,6 +178,39 @@ profile_value() {
   eval "printf '%s' \"\${PROFILE_$1_${PERF_PROFILE}_$2:-$3}\""
 }
 
+# ── The preamble, and the profiles that do not want it ──────────────────────
+# The everyday groups, the quiet probe baseline and the size ramp exist to give
+# a standard run its CONTEXT: what an ordinary user sees while the load phases
+# run, and what one validate costs uncontended. A saturation run wants none of
+# it. They would be ~55s of a 300s cutoff, and — the part that actually matters
+# — they are LOAD ON THE SERVICE while it is being pushed to its refusal point,
+# which contaminates the very measurement the profile exists to take.
+#
+# Forced rather than defaulted: PERF_PROFILE=saturate is a request for one
+# specific measurement, and a preamble left on by an inherited env var would
+# quietly change what it measured. Use PERF_PROFILE=standard to get the
+# preamble back.
+eval "PROFILE_PREAMBLE=\${PROFILE_PREAMBLE_${PERF_PROFILE}:-1}"
+if [ "${PROFILE_PREAMBLE}" = "0" ]; then
+  echo "▸ profile '${PERF_PROFILE}': preamble off (no home/list/create/probe groups, no size ramp)"
+  HOME_THREADS=0
+  LIST_THREADS=0
+  CREATE_THREADS=0
+  PROBE_THREADS=0
+  SIZE_RAMP_THREADS=0
+  EVERYDAY_PHASE_DURATION_SECONDS=0
+  PROBE_BASELINE_SECONDS=0
+fi
+
+# The rungs a profile lists but its cutoff cannot reach. Announced rather than
+# left silent: a rung that produced no samples must read as NOT MEASURED, never
+# as a rung that refused nothing — that would claim capacity never tested.
+eval "PROFILE_CUTOFF_SECONDS=\${PROFILE_CUTOFF_SECONDS_${PERF_PROFILE}:-0}"
+eval "PROFILE_SKIPPED=\${PROFILE_SKIPPED_${PERF_PROFILE}:-}"
+if [ -n "${PROFILE_SKIPPED}" ]; then
+  echo "▸ profile '${PERF_PROFILE}': ${PROFILE_CUTOFF_SECONDS}s cutoff — NOT MEASURED: ${PROFILE_SKIPPED}"
+fi
+
 # The two everyday groups are loop-count driven (home 1x5, list 10x20 over a 10s
 # ramp), so this cap only bites when the backend is slow. It is a guard, not a
 # budget — the groups end when their loops do.

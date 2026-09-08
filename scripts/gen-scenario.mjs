@@ -40,7 +40,8 @@ import {
   budgetCheck,
   generatedBlockStartSeconds,
   ladderSteps,
-  profilePhases,
+  phasesBeyondCutoff,
+  phasesWithinCutoff,
   runSeconds,
   scheduleFrom,
   sizeRampWindowSeconds,
@@ -368,6 +369,96 @@ function revalidateStep(step, defaults) {
         statusIs(CHILD),
         bodyContains(CHILD, 'Fixture actually validates', '"valid":true'),
         durationAssertion(CHILD, budget)
+      )
+    }),
+    `${IND}</hashTree>`
+  )
+}
+
+/**
+ * The gate that turns N looping threads into ONE simultaneous burst.
+ *
+ * `groupSize` 0 means "every thread in this group", which is what keeps the
+ * gate correct when the thread count arrives as a property at run time — a
+ * hard-coded size that disagreed with the thread count would either release
+ * early (no burst) or block forever (no samples).
+ *
+ * The timeout is a deadlock guard, not a pacing knob: if a thread dies the
+ * others must not wait on it for the rest of the run. It is set well above the
+ * widest burst's window so it never fires in a healthy run.
+ */
+function syncTimer(indent) {
+  return `${indent}<SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
+${indent}  <intProp name="groupSize">0</intProp>
+${indent}  <longProp name="timeoutInMs">\${__P(saturateGateTimeoutMs,120000)}</longProp>
+${indent}</SyncTimer>
+${indent}<hashTree/>`
+}
+
+/**
+ * One saturation step: N threads released together, once, past the knee.
+ *
+ * Three things differ from every other validate step in the plan, and all three
+ * are the point rather than an omission:
+ *
+ *   - the status assertion accepts 200 OR 503, because a 503 here is the
+ *     MEASUREMENT. The plan already makes this move once, for the 409 the edit
+ *     contention ladder is built to provoke;
+ *   - there is no duration assertion. A refused request returns in about a
+ *     second and a served one can take twenty, so any single budget would
+ *     either fail the served requests or pass everything;
+ *   - there is no `"valid":true` body check, because a 503 body carries
+ *     `valid:false` by construction.
+ */
+function saturateStep(step, defaults) {
+  const key = stepKey(step)
+  const ladder = ladderByKey('saturate')
+  // "burst of N" rather than "N user(s)": every other row in the report is a
+  // sustained concurrency, and reading this one the same way would overstate
+  // it — this is one simultaneous round, not N users for a window.
+  const label = `saturation: burst of ${step.users} on one ${step.size} upload`
+  return lines(
+    threadGroup({
+      name: `Saturation (${step.size}) @ burst of ${step.users}`,
+      key,
+      defaults,
+      // Loop-count driven: the group ends when its bursts are done, and the
+      // window above it is only a safety net. Every other ladder step is the
+      // other way round.
+      loops: ladder.bursts,
+      comment:
+        `${step.users} thread(s) released TOGETHER against one pre-staged ${step.size}\n` +
+        'upload, climbing deliberately past the point where the validator starts\n' +
+        'refusing. A 503 is the data here, not a failure: it carries\n' +
+        'VALIDATION_BUSY and means the file was never looked at.\n\n' +
+        'The reason it was refused (no_capacity | queue_full | queue_wait |\n' +
+        'memory_budget) is NOT on the wire — read the GeoPackageValidationBusy\n' +
+        'metric, or grep the backend log for "validation refused as busy".'
+    }),
+    `${IND}<hashTree>`,
+    backendDefaults(BODY),
+    authHeaders(BODY),
+    csvDataSet(BODY, {
+      name: 'Project id pool',
+      fileProp: 'projectsCsv',
+      fileDefault: '/opt/perftest/stage/projects.csv',
+      variables: 'projectId'
+    }),
+    syncTimer(BODY),
+    jsonSampler(BODY, {
+      name: label,
+      path: `/baseline/validate/\${__P(uploadId_${step.size},)}`,
+      method: 'POST',
+      body: '{"projectId":"${projectId}"}',
+      timeoutProp: 'validateResponseTimeoutMs',
+      timeoutDefault: TIMEOUT_DEFAULTS.validate,
+      children: lines(
+        responseAssertion(CHILD, {
+          name: 'Status 200 or 503 (503 is the load shed, not a failure)',
+          field: 'Assertion.response_code',
+          testType: ASSERT_MATCHES,
+          values: ['200|503']
+        })
       )
     }),
     `${IND}</hashTree>`
@@ -859,6 +950,8 @@ function renderLadders(defaults) {
         blocks.push(editStep(step, { contention: false }, defaults))
       } else if (ladder.key === 'editContention') {
         blocks.push(editStep(step, { contention: true }, defaults))
+      } else if (ladder.key === 'saturate') {
+        blocks.push(saturateStep(step, defaults))
       } else {
         throw new Error(`gen-scenario has no renderer for ladder "${ladder.key}"`)
       }
@@ -918,7 +1011,8 @@ function renderLaddersSh() {
   ]
 
   for (const [name, profile] of Object.entries(PROFILES)) {
-    const phases = profilePhases(name)
+    const phases = phasesWithinCutoff(name)
+    const skipped = phasesBeyondCutoff(name)
     const budget = budgetCheck(name)
     out.push(`# ── ${name} — ${profile.description}`)
     out.push(
@@ -928,6 +1022,16 @@ function renderLaddersSh() {
           : ', no budget')
     )
     out.push(`PROFILE_BUDGET_SECONDS_${name}=${budget ? budget.limitSeconds : 0}`)
+    // 0 disables the preamble: the everyday groups, the quiet probe and the
+    // size ramp. A saturation run wants none of them — they would be load on
+    // the service while it is being measured, not context for the measurement.
+    out.push(`PROFILE_PREAMBLE_${name}=${profile.preamble === false ? 0 : 1}`)
+    out.push(`PROFILE_CUTOFF_SECONDS_${name}=${profile.cutoffSeconds ?? 0}`)
+    // Rungs the profile lists but the cutoff cannot reach. Emitted so the run
+    // can SAY they were not measured; a rung silently absent from the results
+    // reads as a rung that refused nothing, which would claim capacity that was
+    // never tested.
+    out.push(`PROFILE_SKIPPED_${name}="${skipped.map((phase) => phase.key).join(' ')}"`)
     out.push(`PROFILE_PLAN_SECONDS_${name}=${runSeconds(name)}`)
     out.push(`PROFILE_PHASES_${name}="${phases.map((p) => p.key).join(' ')}"`)
     for (const phase of phases) {
@@ -978,7 +1082,7 @@ function allPhaseKeys() {
  */
 function defaultsForJmx() {
   const scheduled = scheduleFrom(
-    profilePhases(DEFAULT_PROFILE),
+    phasesWithinCutoff(DEFAULT_PROFILE),
     generatedBlockStartSeconds(DEFAULT_PROFILE)
   )
   const byKey = new Map(scheduled.map((phase) => [phase.key, phase]))

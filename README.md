@@ -1060,14 +1060,85 @@ grep "validation refused as busy" <backend log>
 
 or slice `GeoPackageValidationBusy` by `reason` in CloudWatch.
 
-### Why it is not part of the JMeter run
+### The probe and the `saturate` profile
 
-Deliberately separate. The plan's job is to measure latency under load it is
-expected to survive, and it asserts `Status 200` throughout; a phase that
-saturates on purpose would turn correct load-shedding into a red run. The probe
-is a one-off instrument you point at an environment when you want the number, or
-a guard you run with `--expect-clear-to` when you want to know the number has not
-moved.
+There are two ways to get this number, and they have different jobs.
+
+The **probe** is the instrument. It iterates in seconds, needs nothing but Node,
+fires an exact burst and waits for it to finish however long that takes, and
+exits non-zero with `--expect-clear-to` so CI can guard the figure.
+
+The **`saturate` JMeter profile** answers the same question inside the suite, so
+the result lands in the CDP portal like every other run. That is the one thing
+the probe cannot do.
+
+```sh
+PERF_PROFILE=saturate ./entrypoint.sh
+```
+
+It is a separate profile rather than a phase of `standard` because it is a
+different question, not a different sampling depth of the same one — different
+pass rule (a 503 is data), different step shape (bursts, not closed loops), and
+a cutoff instead of a budget. Folding it into `standard` would make `standard`
+mean two things, and would blow its hard twenty-minute ceiling.
+
+#### How the profile differs from every other ladder
+
+| | `standard` ladders | `saturate` |
+| --- | --- | --- |
+| Pass rule | `Status 200` | `Status 200 or 503` |
+| Step shape | N threads looping for a window | one simultaneous burst of N |
+| What ends a step | the window (a stopwatch) | its loop count (the work) |
+| Run length | fits a 20-minute budget | truncated by a 300 s cutoff |
+| Preamble | home / list / create / probe / size ramp | none |
+
+The **burst** is the part that matters. A closed loop is the wrong instrument
+here: a refused request returns in about a second and a served one can take
+twenty, so refused threads re-fire twenty times faster and the load actually
+offered climbs with the refusal rate — "N users" stops meaning "N in flight" at
+exactly the moment it must. A JMeter **Synchronizing Timer** holds all N threads
+at a gate and releases them together, and because a thread only reaches the gate
+after its previous request returned, the gate also drains the previous round.
+
+The **cutoff** is what makes it schedulable. Steps are loop-count driven, so a
+step ends when its burst does and the window above it is only a safety net —
+which is what lets a saturation ladder live in a plan whose every other step is
+duration-driven. `phasesWithinCutoff` then keeps the contiguous prefix that fits
+300 s, and the rest simply never run.
+
+That is why the ladder lists rungs it usually cannot reach, `xlarge` included.
+**The ladder climbs, so the knee is near the bottom** — everything a cutoff
+removes is past-saturation detail whose shape is already established.
+Truncation degrades gracefully here in a way it would not for a latency ladder.
+
+#### The one thing that must never be misread
+
+A rung that did not run and a rung that refused nothing look identical in a
+table of what *was* measured, and reading one as the other publishes capacity
+that was never tested. So the summary names both, and distinguishes them:
+
+```
+  NOT MEASURED — past the 300s cutoff, never attempted:
+    xlarge @ burst of 4, xlarge @ burst of 6
+
+  NOT MEASURED — scheduled but produced NO samples. This is a
+  problem, not a truncation: check staging supplied an uploadId for
+  the size, and that the rung had time to finish its burst.
+    large @ burst of 2
+```
+
+The first is expected. The second means staging failed or a burst was cut off,
+and it would otherwise be invisible.
+
+To buy the rungs the default cutoff cannot reach, raise `cutoffSeconds` on the
+`saturate` profile in `scenarios/ladders.config.mjs` and regenerate — the ladder
+already lists them. It is a generation-time decision, not a run-time one,
+because the truncated phase list is baked into the committed `ladders.sh` that
+`entrypoint.sh` sources:
+
+```sh
+npm run gen-scenario && npm run check-scenario
+```
 
 ## Local Testing with LocalStack
 

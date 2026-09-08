@@ -23,8 +23,12 @@ import {
   SIZE_LABELS,
   WINDOW_BOUNDS,
   budgetCheck,
+  generatedBlockStartSeconds,
   ladderSteps,
+  phasesBeyondCutoff,
+  phasesWithinCutoff,
   profilePhases,
+  stepAllowanceSeconds,
   scheduleFrom,
   stepKey,
   windowSeconds
@@ -45,7 +49,9 @@ describe('window derivation', () => {
   })
 
   test('windows stay inside the clamp at both ends', () => {
-    for (const ladder of LADDERS) {
+    // Closed-loop ladders only. A burst ladder's window is not a sample budget
+    // to be clamped — see the next test.
+    for (const ladder of LADDERS.filter((l) => !l.burst)) {
       for (const step of ladderSteps(ladder)) {
         const window = windowSeconds(step)
         assert.ok(
@@ -58,6 +64,35 @@ describe('window derivation', () => {
         )
       }
     }
+  })
+
+  test('a burst window is a safety net, so it EXCEEDS the burst it guards', () => {
+    // The failure this prevents is the quiet one: a window shorter than the
+    // burst cuts threads off mid-flight, and the rung then reports a refusal
+    // rate computed from a partial sample as though it were a whole one. The
+    // clamp above would have imposed exactly that on xlarge, which is why burst
+    // ladders are excluded from it rather than squeezed into it.
+    for (const ladder of LADDERS.filter((l) => l.burst)) {
+      for (const step of ladderSteps(ladder)) {
+        const window = windowSeconds(step)
+        const burst = stepAllowanceSeconds(ladder, step.size) * ladder.bursts
+        assert.ok(
+          window > burst,
+          `${stepKey(step)} window ${window}s does not clear its ${burst}s burst`
+        )
+      }
+    }
+  })
+
+  test('a burst window does not shrink as the burst gets wider', () => {
+    // Every closed-loop window divides by `users`, because N threads produce
+    // samples N times faster. A burst is ONE simultaneous round however wide it
+    // is, so the same division would give the widest rungs — the ones most
+    // likely to saturate — the least time to finish.
+    const ladder = LADDERS.find((l) => l.burst)
+    const narrow = windowSeconds({ ladder, size: 'large', users: 2 })
+    const wide = windowSeconds({ ladder, size: 'large', users: 12 })
+    assert.equal(narrow, wide)
   })
 
   test('a bigger file gets a longer window at the same concurrency', () => {
@@ -98,11 +133,21 @@ describe('profiles', () => {
     assert.deepEqual(users, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
   })
 
-  test('standard is the only profile', () => {
-    // The suite deliberately has ONE profile: five step lists proved harder to
-    // keep meaningful than one. A second entry here should be a conscious
-    // decision to bring the profile machinery back, not an accident.
-    assert.deepEqual(Object.keys(PROFILES), ['standard'])
+  test('the profile list is exactly the two intended ones', () => {
+    // The suite deliberately collapsed FIVE profiles into one: quick/standard/
+    // deep/full/soak were different sampling depths of the SAME question, and
+    // keeping five step lists meaningful cost more than the flexibility bought.
+    // That decision still stands, and this assertion still guards it.
+    //
+    // `saturate` is admitted against it on purpose, because it is not another
+    // depth of the same question. It asks the opposite one — where the service
+    // starts REFUSING work — and answers it with a different pass rule (503 is
+    // data, not failure), a different step shape (bursts, not closed loops) and
+    // a cutoff instead of a budget. None of that could live as a knob on
+    // `standard` without making `standard` mean two things.
+    //
+    // A THIRD entry should be a conscious decision, not an accident.
+    assert.deepEqual(Object.keys(PROFILES), ['standard', 'saturate'])
   })
 })
 
@@ -144,6 +189,71 @@ describe('schedule', () => {
         [...users].sort((a, b) => a - b),
         `${group} does not climb`
       )
+    }
+  })
+})
+
+describe('the saturation cutoff', () => {
+  test('a profile with no cutoff runs everything it lists', () => {
+    assert.deepEqual(phasesWithinCutoff('standard'), profilePhases('standard'))
+    assert.deepEqual(phasesBeyondCutoff('standard'), [])
+  })
+
+  test('kept and skipped together account for every listed rung', () => {
+    // Nothing may go missing between the two: a rung in neither list is a rung
+    // that silently never ran and was never reported as unrun.
+    const kept = phasesWithinCutoff('saturate').map((p) => p.key)
+    const skipped = phasesBeyondCutoff('saturate').map((p) => p.key)
+    assert.deepEqual(
+      [...kept, ...skipped].sort(),
+      profilePhases('saturate').map((p) => p.key).sort()
+    )
+  })
+
+  test('every rung it keeps actually finishes inside the cutoff', () => {
+    const cutoff = PROFILES.saturate.cutoffSeconds
+    const scheduled = scheduleFrom(
+      phasesWithinCutoff('saturate'),
+      generatedBlockStartSeconds('saturate')
+    )
+    for (const phase of scheduled) {
+      assert.ok(
+        phase.delay + phase.window <= cutoff,
+        `${phase.key} ends at ${phase.delay + phase.window}s, past the ${cutoff}s cutoff`
+      )
+    }
+  })
+
+  test('it keeps a contiguous PREFIX rather than cherry-picking what fits', () => {
+    // The tempting bug is to skip an expensive rung and take a later cheap one.
+    // That would silently reorder the staircase and produce, say, an xlarge rung
+    // with no large rungs beneath it to read it against.
+    const all = profilePhases('saturate').map((p) => p.key)
+    const kept = phasesWithinCutoff('saturate').map((p) => p.key)
+    assert.deepEqual(kept, all.slice(0, kept.length))
+  })
+
+  test('the run reaches xlarge, with enough rungs to bracket a knee', () => {
+    // The whole point of the weighting: a single xlarge rung brackets nothing.
+    const xlarge = phasesWithinCutoff('saturate').filter((p) =>
+      p.key.startsWith('saturate_xlarge_')
+    )
+    assert.ok(
+      xlarge.length >= 2,
+      `expected at least 2 xlarge rungs inside the cutoff, got ${xlarge.length}`
+    )
+  })
+
+  test('the saturation ladder climbs within each size', () => {
+    // A staircase that does not climb cannot find a knee — and with a prefix
+    // cutoff, an unsorted ladder would also truncate in the wrong place.
+    const bySize = new Map()
+    for (const phase of phasesWithinCutoff('saturate')) {
+      const size = phase.key.replace('saturate_', '').replace(/_\d+$/, '')
+      bySize.set(size, [...(bySize.get(size) ?? []), phase.users])
+    }
+    for (const [size, users] of bySize) {
+      assert.deepEqual(users, [...users].sort((a, b) => a - b), `${size} does not climb`)
     }
   })
 })
@@ -221,7 +331,12 @@ describe('entrypoint.sh derives the same schedule this config does', () => {
       const anchor = fromShell.length ? fromShell[0].delay : 0
       // No gap override: each phase carries its own drain time, and the point of
       // this test is that the shell honours the same ones.
-      const fromConfig = scheduleFrom(profilePhases(name), anchor).map(
+      //
+      // `phasesWithinCutoff`, not `profilePhases`: a profile with a cutoff runs
+      // a PREFIX of what it lists, and the shell is handed that prefix. Comparing
+      // against the full list would fail on the rungs the cutoff drops — which
+      // is exactly what it did when the cutoff was introduced.
+      const fromConfig = scheduleFrom(phasesWithinCutoff(name), anchor).map(
         ({ key, users, window, delay }) => ({
         key,
         // The mixed workload has no user count in the ladder tables; the shell
