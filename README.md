@@ -1159,6 +1159,42 @@ That is why the ladder lists rungs it usually cannot reach, `xlarge` included.
 removes is past-saturation detail whose shape is already established.
 Truncation degrades gracefully here in a way it would not for a latency ladder.
 
+#### Seeing the knee in the JMeter dashboard
+
+Two built-in views show it, and the run's own summary points at both:
+
+* **Statistics table** (dashboard index) — one row per sampler, and every rung
+  is its own sampler, so its `Error %` column **is** the refusal rate per burst
+  size per file size. Read it down the page; the knee is where it stops being 0.
+* **Codes Per Second** (Charts → Throughput) — each response code as its own
+  time series, so the 503 line appearing is the moment the service began
+  shedding. Read it against the phase schedule to attribute it to a rung.
+
+**Response Time Distribution** is a useful secondary: refusals cluster around a
+second while served requests sit far to the right, so a saturating run is
+visibly bimodal.
+
+What the dashboard cannot draw is refusal-rate against burst-size as a curve,
+one line per file size. There is no per-label error chart and the report
+generator's custom graphs will not express it — that shape lives only in the
+summary table above.
+
+##### Why a saturate run looks red, on purpose
+
+JMeter fails a sampler by **response code**, before assertions run, and a
+passing assertion cannot un-fail it. So every refusal is a KO and a saturate run
+reports something like 16% errors for a service behaving exactly as designed.
+
+That is deliberate. JMeter's "Ignore Status" (`assume_success`) would make the
+run green — and empty the `Error %` column, which is the single clearest picture
+of the knee the dashboard produces. A run with it enabled reported **0.00%
+errors while shedding load on a third of its rungs**. Visibility wins: a red
+run that shows where the service saturates beats a green one that hides it.
+
+This is already the suite's norm rather than a new exception — the project-list
+group is *red by design*, and `entrypoint.sh` states that the dashboard, not the
+task exit code, is the source of truth. The exit code is 0 either way.
+
 #### The one thing that must never be misread
 
 A rung that did not run and a rung that refused nothing look identical in a

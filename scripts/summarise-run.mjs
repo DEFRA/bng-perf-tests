@@ -771,6 +771,21 @@ function main() {
       '  by `reason`, or grep the backend log for "validation refused as busy":'
     )
     out.push('  no_capacity | queue_full | queue_wait | memory_budget.')
+    out.push('\n  In the JMeter dashboard, two views show the same thing visually:')
+    out.push(
+      '    Statistics table  — one row per rung; its `Error %` column IS the'
+    )
+    out.push(
+      '                        refusal rate, so read it down the page and the'
+    )
+    out.push('                        knee is where it stops being 0.')
+    out.push(
+      '    Codes Per Second  — (Charts > Throughput) each response code as its'
+    )
+    out.push(
+      '                        own series, so the 503 line appearing is the'
+    )
+    out.push('                        moment the service began shedding.')
     for (const line of unmeasuredNotes(samples)) {
       out.push(line)
     }

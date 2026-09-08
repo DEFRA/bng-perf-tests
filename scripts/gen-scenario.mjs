@@ -228,7 +228,7 @@ function javaHash(value) {
   return String(BigInt.asIntN(INT32, BigInt(hash)))
 }
 
-function responseAssertion(indent, { name, field, testType, values, assumeSuccess = false }) {
+function responseAssertion(indent, { name, field, testType, values }) {
   const items = values
     .map(
       (v) => `${indent}    <stringProp name="${javaHash(v)}">${xml(v)}</stringProp>`
@@ -239,7 +239,7 @@ ${indent}  <collectionProp name="Asserion.test_strings">
 ${items}
 ${indent}  </collectionProp>
 ${indent}  <stringProp name="Assertion.test_field">${field}</stringProp>
-${indent}  <boolProp name="Assertion.assume_success">${assumeSuccess}</boolProp>
+${indent}  <boolProp name="Assertion.assume_success">false</boolProp>
 ${indent}  <intProp name="Assertion.test_type">${testType}</intProp>
 ${indent}</ResponseAssertion>
 ${indent}<hashTree/>`
@@ -469,21 +469,28 @@ function saturateStep(step, defaults) {
           name: 'Status 200 or 503 (503 is the load shed, not a failure)',
           field: 'Assertion.response_code',
           testType: ASSERT_MATCHES,
-          values: ['200|503'],
-          // JMeter's "Ignore Status", and this ladder is what it is for.
-          //
-          // A sampler is marked failed by RESPONSE CODE before any assertion
-          // runs, and a PASSING assertion cannot un-fail it — assertions only
-          // ever fail a sample. So without this every refusal counted as an
-          // error: a first run of this profile reported 16.49% errors for a
-          // service that was behaving exactly as designed, and the CDP portal
-          // would have shown a correct run as red.
-          //
-          // assume_success clears that status BEFORE the assertion, so the
-          // assertion below is what decides. A 500, or a timeout, still fails
-          // — only the two outcomes named above pass.
-          assumeSuccess: true
+          values: ['200|503']
         })
+        // No "Ignore Status" here, deliberately, and it is worth saying why
+        // because the opposite looks tidier.
+        //
+        // A sampler is failed by RESPONSE CODE before any assertion runs, and a
+        // passing assertion cannot un-fail it — assertions only ever fail a
+        // sample. So every refusal counts as a KO, and a saturate run reports
+        // something like 16% errors for a service behaving exactly as designed.
+        // Setting assume_success would clear that and make the run look green.
+        //
+        // It would also make the report useless. The dashboard's Statistics
+        // table is one row per sampler, and each rung here is its own sampler —
+        // so its `Error %` column IS the refusal rate per burst size per file
+        // size, which is the clearest picture of the knee that JMeter produces
+        // on its own. Marking the 503s successful empties that column: a run
+        // with assume_success on reported 0.00% errors while shedding load on
+        // a third of its rungs.
+        //
+        // A red-looking run is already this suite's normal — the list group is
+        // "red by design", and entrypoint.sh states that the dashboard, not the
+        // exit code, is the source of truth. Visibility wins over tidiness.
       )
     }),
     `${IND}</hashTree>`
