@@ -193,6 +193,63 @@ describe('schedule', () => {
   })
 })
 
+describe("the CDP portal's one text field", () => {
+  /**
+   * A CDP perf-test task is configured through a single free-text field, which
+   * reaches the container as TEST_SCENARIO. It used to select a PLAN only, so
+   * typing a profile name into it selected no plan, fell back to the default,
+   * left PERF_PROFILE unset — and ran the full ~18-minute standard suite while
+   * looking like it had done what was asked. These pin the mapping that fixes
+   * that, because the failure mode is a run that succeeds at the wrong thing.
+   */
+  const run = (env) =>
+    execFileSync('sh', [join(ROOT, 'entrypoint.sh')], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        JM_HOME: ROOT,
+        ENVIRONMENT: 'local',
+        PERF_DUMP_SCHEDULE: 'true',
+        PERF_PROFILE: '',
+        TEST_SCENARIO: '',
+        ...env
+      },
+      stdio: ['ignore', 'pipe', 'ignore']
+    })
+
+  const phasesIn = (output) =>
+    output.split('\n').filter((line) => line.startsWith('PHASE ')).map((l) => l.split(' ')[1])
+
+  test('a profile name typed into it selects that profile', () => {
+    const phases = phasesIn(run({ TEST_SCENARIO: 'saturate' }))
+    assert.ok(phases.length > 0, 'expected the saturate ladder to be scheduled')
+    assert.ok(
+      phases.every((key) => key.startsWith('saturate_')),
+      `expected only saturation rungs, got ${phases.slice(0, 3).join(', ')}`
+    )
+  })
+
+  test('an unknown value still runs, at the default profile', () => {
+    // The base image bakes ENV TEST_SCENARIO=test for its own sample plan. A
+    // stale placeholder must never fail the run.
+    const phases = phasesIn(run({ TEST_SCENARIO: 'test' }))
+    assert.ok(phases.some((key) => key.startsWith('journey_')))
+    assert.ok(!phases.some((key) => key.startsWith('saturate_')))
+  })
+
+  test('an explicit PERF_PROFILE beats the portal field', () => {
+    // Someone who set both meant the more specific knob.
+    const phases = phasesIn(run({ TEST_SCENARIO: 'saturate', PERF_PROFILE: 'standard' }))
+    assert.ok(phases.some((key) => key.startsWith('journey_')))
+  })
+
+  test('unset runs the whole suite', () => {
+    const phases = phasesIn(run({}))
+    assert.ok(phases.some((key) => key.startsWith('journey_')))
+  })
+})
+
 describe('the saturation cutoff', () => {
   test('a profile with no cutoff runs everything it lists', () => {
     assert.deepEqual(phasesWithinCutoff('standard'), profilePhases('standard'))

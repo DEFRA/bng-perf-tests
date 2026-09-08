@@ -698,7 +698,7 @@ run is meaningless.
 
 | Env var                          | Default                                        | Purpose                                                        |
 | -------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
-| `TEST_SCENARIO`                  | `bng-perf`                                     | Escape hatch only — leave unset to run the whole suite.         |
+| `TEST_SCENARIO`                  | `bng-perf`                                     | The CDP portal's single text field. Accepts a **profile** name (`saturate`) or a plan name; unset runs the whole suite at `standard`. |
 | `UPLOAD_SIZES`                   | `normal:80,busy:800,large:5000,xlarge:12000` | How big each step is. `label:parcels` pairs — the **labels are fixed**, see below. |
 | `STAGE_UPLOADS`                  | `true` for this plan                           | `false` skips staging *and* every phase that needed it.         |
 | `CDP_UPLOADER_URL`               | `https://cdp-uploader.<ENVIRONMENT>.cdp-int.defra.cloud` | The uploader to POST staged files to.                 |
@@ -1081,6 +1081,31 @@ different question, not a different sampling depth of the same one — different
 pass rule (a 503 is data), different step shape (bursts, not closed loops), and
 a cutoff instead of a budget. Folding it into `standard` would make `standard`
 mean two things, and would blow its hard twenty-minute ceiling.
+
+#### Running it from the CDP Portal
+
+The portal configures a task through a single free-text field, which reaches the
+container as `TEST_SCENARIO`. That field accepts a **profile** name:
+
+```
+TEST_SCENARIO = saturate
+```
+
+Historically `TEST_SCENARIO` selected a *plan* (`scenarios/<name>.jmx`) and
+nothing else. Typing a profile name into it was therefore quietly wrong:
+`saturate` matched no plan, fell back to `bng-perf`, left `PERF_PROFILE` unset,
+and ran the full ~18-minute `standard` suite — with nothing but a `WARNING` on
+stderr to say so. It now accepts either, and says which it understood:
+
+```
+▸ TEST_SCENARIO='saturate' names a profile rather than a plan —
+  running the 'saturate' profile against bng-perf.jmx
+```
+
+An unknown value still falls back rather than failing the run — the base image
+bakes `ENV TEST_SCENARIO=test` for its own sample plan, and a stale placeholder
+must never break a task — but it now names both the plans and the profiles it
+knows, so a typo is obvious. An explicit `PERF_PROFILE` beats the field.
 
 #### How the profile differs from every other ladder
 

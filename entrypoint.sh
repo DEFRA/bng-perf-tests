@@ -47,12 +47,10 @@ fi
 # selecting; TEST_SCENARIO exists only as an escape hatch, and an unknown name
 # falls back to the default, so a stale placeholder (e.g. the base image's
 # inherited TEST_SCENARIO=test) can never fail the run.
+# Resolved once ladders.sh has said which PROFILE names exist, because the CDP
+# portal's single text field can name either a plan or a profile — see "the
+# portal's one text field" below.
 SCENARIO=${TEST_SCENARIO:-bng-perf}
-if [ ! -f "${JM_SCENARIOS}/${SCENARIO}.jmx" ]; then
-  echo "WARNING: scenario '${SCENARIO}.jmx' not found in ${JM_SCENARIOS} — falling back to bng-perf" >&2
-  SCENARIO=bng-perf
-fi
-SCENARIOFILE=${JM_SCENARIOS}/${SCENARIO}.jmx
 
 # Per-service targets. The home-page group hits the frontend; the project-list
 # group hits the backend. SERVICE_ENDPOINT still overrides the BACKEND host (kept
@@ -158,7 +156,6 @@ fi
 # authority on what exists. A profile never changes what the plan CONTAINS —
 # every step has a thread group either way — it sets thread counts, and a step
 # at 0 threads costs nothing and reserves no wall clock.
-PERF_PROFILE=${PERF_PROFILE:-${PERF_PROFILE_DEFAULT}}
 profile_is_known() {
   for known in ${PERF_PROFILE_NAMES}; do
     if [ "${known}" = "$1" ]; then
@@ -167,10 +164,48 @@ profile_is_known() {
   done
   return 1
 }
+
+# ── The portal's one text field ─────────────────────────────────────────────
+# A CDP perf-test task is configured through a single free-text field, and it
+# reaches the container as TEST_SCENARIO — which is why this variable exists at
+# all: the base image bakes ENV TEST_SCENARIO=test for its own sample plan.
+#
+# It was only ever a PLAN selector (scenarios/<name>.jmx). That made typing a
+# profile name into it quietly wrong: `saturate` matched no plan, fell back to
+# bng-perf, left PERF_PROFILE unset, and ran the full ~18-minute `standard`
+# suite. The only clue was a WARNING on stderr, in a task log nobody reads when
+# the run looks like it worked.
+#
+# So the field now accepts EITHER. A value naming a known profile selects that
+# profile against the one plan — which needs nothing else, because every thread
+# group is already in the plan and a profile only sets thread counts. Anything
+# else keeps its original meaning as a plan name.
+#
+# An explicit PERF_PROFILE still wins: it is the more specific knob, and someone
+# who set both meant the one they named.
+if [ -z "${PERF_PROFILE}" ] && [ -n "${TEST_SCENARIO}" ] && profile_is_known "${TEST_SCENARIO}"; then
+  echo "▸ TEST_SCENARIO='${TEST_SCENARIO}' names a profile rather than a plan — running the '${TEST_SCENARIO}' profile against bng-perf.jmx"
+  PERF_PROFILE=${TEST_SCENARIO}
+  SCENARIO=bng-perf
+fi
+
+PERF_PROFILE=${PERF_PROFILE:-${PERF_PROFILE_DEFAULT}}
 if ! profile_is_known "${PERF_PROFILE}"; then
   echo "ERROR: unknown PERF_PROFILE '${PERF_PROFILE}' — expected one of: ${PERF_PROFILE_NAMES}" >&2
   exit 1
 fi
+
+# Now the plan. An unknown name still falls back rather than failing the run, so
+# a stale placeholder on the task (the base image's inherited TEST_SCENARIO=test)
+# can never break it — but it is LOUD about it now, because the same silence is
+# what made a mistyped profile name look like a successful run.
+if [ ! -f "${JM_SCENARIOS}/${SCENARIO}.jmx" ]; then
+  echo "WARNING: '${SCENARIO}' is neither a plan in ${JM_SCENARIOS} nor one of the" >&2
+  echo "         known profiles (${PERF_PROFILE_NAMES}) — falling back to the whole" >&2
+  echo "         suite at the '${PERF_PROFILE}' profile. If you meant a profile, check the spelling." >&2
+  SCENARIO=bng-perf
+fi
+SCENARIOFILE=${JM_SCENARIOS}/${SCENARIO}.jmx
 
 # Read a generated per-profile value. The keys come from ladders.sh, which this
 # repo generates, so they are known-safe identifiers rather than operator input.
@@ -524,6 +559,10 @@ echo "  phase schedule:      everyday 0-${EVERYDAY_PHASE_DURATION_SECONDS}s | pr
 eval "BANNER_BUDGET_SECONDS=\${PROFILE_BUDGET_SECONDS_${PERF_PROFILE}:-0}"
 if [ "${BANNER_BUDGET_SECONDS}" -gt 0 ]; then
   BANNER_BUDGET="budget $((BANNER_BUDGET_SECONDS / 60)) min incl. setup"
+elif [ "${PROFILE_CUTOFF_SECONDS}" -gt 0 ]; then
+  # A cutoff is not the absence of a budget, it is a different kind of one: the
+  # ladder deliberately lists more than it can run and is truncated to fit.
+  BANNER_BUDGET="${PROFILE_CUTOFF_SECONDS}s cutoff — the ladder is truncated to fit"
 else
   BANNER_BUDGET="no budget — this profile is meant to be long"
 fi
