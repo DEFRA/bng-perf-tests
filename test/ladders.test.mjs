@@ -11,7 +11,7 @@
  * runs in is a JMeter image with Node in it, not a JS project.
  */
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test, describe } from 'node:test'
@@ -193,17 +193,27 @@ describe('schedule', () => {
   })
 })
 
-describe("the CDP portal's one text field", () => {
+describe("the CDP portal's Profile field", () => {
   /**
-   * A CDP perf-test task is configured through a single free-text field, which
-   * reaches the container as TEST_SCENARIO. It used to select a PLAN only, so
-   * typing a profile name into it selected no plan, fell back to the default,
-   * left PERF_PROFILE unset — and ran the full ~18-minute standard suite while
-   * looking like it had done what was asked. These pin the mapping that fixes
-   * that, because the failure mode is a run that succeeds at the wrong thing.
+   * A CDP perf-test task is configured through a single free-text field — the
+   * portal's "Profile" — and cdp-self-service-ops sends it to the container as
+   * PROFILE, not as TEST_SCENARIO.
+   *
+   * This suite read TEST_SCENARIO, which nothing on CDP sets: the base image
+   * bakes it for its own sample plan and the Dockerfile clears it. So a task
+   * started with Profile=short arrived with PROFILE=short and TEST_SCENARIO
+   * empty, fell through to the default plan — which exists, so no warning fired
+   * — and ran the full ~18-minute standard suite. It went green. The portal
+   * showed the value that had been asked for. The report answered a different
+   * question, and nothing anywhere said so.
+   *
+   * These pin the mapping, and they pin the announcement too, because the
+   * failure mode here is not a run that breaks — it is a run that succeeds at
+   * the wrong thing, and the only defence against that is a run that says what
+   * it resolved.
    */
-  const run = (env) =>
-    execFileSync('sh', [join(ROOT, 'entrypoint.sh')], {
+  const runFull = (env) =>
+    spawnSync('sh', [join(ROOT, 'entrypoint.sh')], {
       cwd: ROOT,
       encoding: 'utf8',
       env: {
@@ -212,17 +222,26 @@ describe("the CDP portal's one text field", () => {
         ENVIRONMENT: 'local',
         PERF_DUMP_SCHEDULE: 'true',
         PERF_PROFILE: '',
+        PROFILE: '',
         TEST_SCENARIO: '',
         ...env
       },
-      stdio: ['ignore', 'pipe', 'ignore']
+      stdio: ['ignore', 'pipe', 'pipe']
     })
+
+  const run = (env) => runFull(env).stdout
+  // The announcement is the point of half of these, and it is split across both
+  // streams on purpose: a resolution is normal output, a fallback is a warning.
+  const said = (env) => {
+    const result = runFull(env)
+    return `${result.stdout}\n${result.stderr}`
+  }
 
   const phasesIn = (output) =>
     output.split('\n').filter((line) => line.startsWith('PHASE ')).map((l) => l.split(' ')[1])
 
-  test('a profile name typed into it selects that profile', () => {
-    const phases = phasesIn(run({ TEST_SCENARIO: 'short' }))
+  test('PROFILE selects the profile — the variable the portal actually sets', () => {
+    const phases = phasesIn(run({ PROFILE: 'short' }))
     assert.ok(phases.length > 0, 'expected the saturation ladder to be scheduled')
     assert.ok(
       phases.every((key) => key.startsWith('saturate_')),
@@ -230,7 +249,48 @@ describe("the CDP portal's one text field", () => {
     )
   })
 
-  test('an unknown value still runs, at the default profile', () => {
+  test('PROFILE wins over TEST_SCENARIO', () => {
+    // Both name a profile. The portal's variable is the one a real run carries,
+    // so a TEST_SCENARIO inherited from the base image must not beat it.
+    const phases = phasesIn(run({ PROFILE: 'short', TEST_SCENARIO: 'test' }))
+    assert.ok(
+      phases.every((key) => key.startsWith('saturate_')),
+      'PROFILE=short must win over an inherited TEST_SCENARIO'
+    )
+  })
+
+  test('an unknown PROFILE still runs, at the default, and says it did not match', () => {
+    // Case matters and padding matters, because the comparison is exact — so
+    // the run has to name what it got, or a capital letter costs 20 minutes and
+    // a report that answers the wrong question.
+    const output = said({ PROFILE: 'Short' })
+    assert.ok(!phasesIn(output).some((key) => key.startsWith('saturate_')))
+    assert.match(output, /PROFILE='Short' is not a profile this image has/)
+    assert.match(output, /standard short/)
+  })
+
+  test('no Profile value at all says so, rather than defaulting in silence', () => {
+    // The original bug in one assertion: this is the case that produced no
+    // output whatsoever, and it is the case a mis-plumbed portal field lands in.
+    const output = said({})
+    assert.match(output, /no Profile value reached this task/)
+    assert.ok(phasesIn(output).some((key) => key.startsWith('journey_')))
+  })
+
+  test('a resolved profile is announced, including which variable carried it', () => {
+    assert.match(said({ PROFILE: 'short' }), /profile: PROFILE='short'/)
+    assert.match(said({ TEST_SCENARIO: 'short' }), /profile: TEST_SCENARIO='short'/)
+  })
+
+  test('TEST_SCENARIO still names a profile, for a local run and the compose file', () => {
+    const phases = phasesIn(run({ TEST_SCENARIO: 'short' }))
+    assert.ok(
+      phases.every((key) => key.startsWith('saturate_')),
+      'TEST_SCENARIO=short must keep working outside CDP'
+    )
+  })
+
+  test('an unknown TEST_SCENARIO still runs, at the default profile', () => {
     // The base image bakes ENV TEST_SCENARIO=test for its own sample plan. A
     // stale placeholder must never fail the run.
     const phases = phasesIn(run({ TEST_SCENARIO: 'test' }))
@@ -239,14 +299,13 @@ describe("the CDP portal's one text field", () => {
   })
 
   test('a stale PERF_PROFILE cannot override the portal field', () => {
-    // TEST_SCENARIO is the ONLY knob. Two knobs for one decision means whichever
-    // loses is a setting that silently does nothing — and a PERF_PROFILE left on
-    // a task from an earlier run would have quietly beaten what someone typed
-    // into the portal, with nothing in the output saying so.
-    const phases = phasesIn(run({ TEST_SCENARIO: 'short', PERF_PROFILE: 'standard' }))
+    // Two knobs for one decision means whichever loses is a setting that
+    // silently does nothing — and a PERF_PROFILE left on a task from an earlier
+    // run would have quietly beaten what someone typed into the portal.
+    const phases = phasesIn(run({ PROFILE: 'short', PERF_PROFILE: 'standard' }))
     assert.ok(
       phases.every((key) => key.startsWith('saturate_')),
-      'TEST_SCENARIO=short must win over a leftover PERF_PROFILE'
+      'PROFILE=short must win over a leftover PERF_PROFILE'
     )
   })
 
@@ -387,10 +446,11 @@ describe('entrypoint.sh derives the same schedule this config does', () => {
           ...process.env,
           JM_HOME: ROOT,
           ENVIRONMENT: 'local',
-          // TEST_SCENARIO, not PERF_PROFILE: the portal's field is the only knob
-          // the entrypoint takes, so driving it any other way would test a path
-          // no real run uses.
-          TEST_SCENARIO: name,
+          // PROFILE, not PERF_PROFILE and not TEST_SCENARIO: this is the
+          // variable a CDP task actually carries, so driving it any other way
+          // would test a path no real run uses.
+          PROFILE: name,
+          TEST_SCENARIO: '',
           PERF_PROFILE: '',
           PERF_DUMP_SCHEDULE: 'true'
         },

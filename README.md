@@ -173,6 +173,7 @@ result); only an infrastructure failure — a missing plan, a failed token mint,
 seed, a failed staging step that produced *nothing*, or no report — makes the task exit
 non-zero.
 
+What runs is chosen by **`PROFILE`** — the value typed into the portal's Profile field.
 `TEST_SCENARIO` is an escape hatch, not something a normal run sets: `TEST_SCENARIO=<name>`
 runs `scenarios/<name>.jmx` instead, and an unknown name falls back to `bng-perf`, so a
 stale placeholder on the CDP task (e.g. the base image's inherited `TEST_SCENARIO=test`)
@@ -698,7 +699,8 @@ run is meaningless.
 
 | Env var                          | Default                                        | Purpose                                                        |
 | -------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
-| `TEST_SCENARIO`                  | `bng-perf`                                     | The CDP portal's single text field. Accepts a **profile** name (`short`) or a plan name; unset runs the whole suite at `standard`. |
+| `PROFILE`                        | unset → `standard`                             | **The CDP portal's Profile field.** Names a profile (`standard` \| `short`). This is the variable a CDP task carries; every run states what it resolved. |
+| `TEST_SCENARIO`                  | `bng-perf`                                     | Names a **plan** (`scenarios/<name>.jmx`), and — second, for local runs — a profile. Owned by the base image, never set by the portal. |
 | `UPLOAD_SIZES`                   | `normal:80,busy:800,large:5000,xlarge:12000` | How big each step is. `label:parcels` pairs — the **labels are fixed**, see below. |
 | `STAGE_UPLOADS`                  | `true` for this plan                           | `false` skips staging *and* every phase that needed it.         |
 | `CDP_UPLOADER_URL`               | `https://cdp-uploader.<ENVIRONMENT>.cdp-int.defra.cloud` | The uploader to POST staged files to.                 |
@@ -718,7 +720,7 @@ run is meaningless.
 | `SIZE_RAMP_LOOPS`                | `1`                                            | Weighted passes over the four sizes.                            |
 | `SIZE_LOOPS_{NORMAL,BUSY,LARGE,XLARGE}` | `20/8/3/2`                            | Samples per size in a pass. Weighted so small files earn a percentile. |
 | `SIZE_RAMP_DELAY_SECONDS`        | _derived_                                      | When the size ramp starts.                                      |
-| ~~`PERF_PROFILE`~~               | —                                              | **Ignored.** Use `TEST_SCENARIO` — it is the only knob for what runs. |
+| ~~`PERF_PROFILE`~~               | —                                              | **Ignored.** Use `PROFILE` — it is the only knob for what runs. |
 | `PERF_DUMP_SCHEDULE`             | unset                                          | `true` prints the resolved schedule and exits, touching nothing. |
 | `WINDOW_<step>`                  | _derived_                                      | Override one step's window, e.g. `WINDOW_journey_normal_10=30`. The timeline re-derives around it. |
 | `PHASE_GAP_SECONDS`              | _derived per phase_                            | Set it and every phase gets that uniform gap instead of its own drain time. |
@@ -992,7 +994,7 @@ backend's config:
 The lowest of the three is the knee. The `short` profile **measures** it.
 
 ```sh
-TEST_SCENARIO=short ./entrypoint.sh          # or: TEST_SCENARIO=short docker compose up --build
+PROFILE=short ./entrypoint.sh                # or: PROFILE=short docker compose up --build
 ```
 
 It climbs a ladder of concurrency levels, fires each as a *simultaneous burst*
@@ -1049,38 +1051,69 @@ grep "validation refused as busy" <backend log>
 
 #### Running it from the CDP Portal
 
-The portal configures a task through a single free-text field, which reaches the
-container as `TEST_SCENARIO`. That field accepts a **profile** name:
+On the test-suite page, in the **Run** section, press **Yes** under **Profile**
+and enter:
 
 ```
-TEST_SCENARIO = short
+short
 ```
 
-Historically `TEST_SCENARIO` selected a *plan* (`scenarios/<name>.jmx`) and
-nothing else. Typing a profile name into it was therefore quietly wrong:
-`short` matched no plan, fell back to `bng-perf`, left the profile at its default,
-and ran the full ~18-minute `standard` suite — with nothing but a `WARNING` on
-stderr to say so. It now accepts either, and says which it understood:
+The portal sends that value to the container as the environment variable
+**`PROFILE`** — `cdp-self-service-ops` builds the ECS task message with
+`environment_variables: { …, PROFILE: profile }`
+([generate-test-run-message.js](https://github.com/DEFRA/cdp-self-service-ops/blob/main/src/api/deploy-test-suite/helpers/generate-test-run-message.js)).
+
+Names are compared **exactly**. `Short`, `SHORT` or a trailing space will not
+match, and the run says so rather than guessing.
+
+##### Why this is worth a section
+
+This suite originally read `TEST_SCENARIO`, on the belief that it was the portal
+field. It is not: `TEST_SCENARIO` belongs to the base image, which bakes
+`ENV TEST_SCENARIO=test` for its own sample plan, and nothing on CDP ever sets
+it. So a task started with **Profile = short** arrived with `PROFILE=short` and
+`TEST_SCENARIO` empty, `${TEST_SCENARIO:-bng-perf}` resolved to a plan that
+exists — so no warning fired anywhere — and the task ran the full ~18-minute
+`standard` suite. It exited 0. The portal showed the value that had been asked
+for. The report answered a different question, and nothing said so.
+
+The fix is the variable, and the guard against a repeat is that **every** run now
+announces what it resolved and where the value came from:
 
 ```
-▸ TEST_SCENARIO='short' names a profile rather than a plan —
-  running the 'short' profile against bng-perf.jmx
+▸ profile: PROFILE='short' — running the 'short' profile against bng-perf.jmx
 ```
 
-An unknown value still falls back rather than failing the run — the base image
-bakes `ENV TEST_SCENARIO=test` for its own sample plan, and a stale placeholder
-must never break a task — but it now names both the plans and the profiles it
-knows, so a typo is obvious.
-
-`TEST_SCENARIO` is the **only** knob for what runs. `PERF_PROFILE` used to be a
-second one, and two knobs for one decision means whichever loses is a setting
-that silently does nothing — a `PERF_PROFILE` left on a task from an earlier run
-would have quietly beaten what someone typed into the portal. It is now ignored,
-with a note saying so:
+```
+▸ profile: no Profile value reached this task — running the default 'standard' profile.
+           To run another, press Yes under Profile on the run form and enter one of: standard short
+```
 
 ```
-▸ NOTE: PERF_PROFILE='short' is ignored — the run is chosen by TEST_SCENARIO alone.
-        Use TEST_SCENARIO=short instead.
+▸ WARNING: PROFILE='Short' is not a profile this image has.
+           Known profiles: standard short. Names are compared exactly —
+           a capital letter or a stray space will not match.
+           Falling back to 'standard', so this run measures the default suite.
+```
+
+The default case is announced deliberately. A run that quietly defaults is
+indistinguishable from a run that did what was asked, and that is precisely the
+failure this section exists to describe.
+
+##### The other two variables
+
+`TEST_SCENARIO` still names a **plan** (`scenarios/<name>.jmx`) — it is the only
+thing that can — and still accepts a profile name second, so
+`TEST_SCENARIO=short docker compose up` keeps working locally. `PROFILE` wins
+when both are set, because `PROFILE` is what a real CDP task carries.
+
+`PERF_PROFILE` is ignored. Two knobs for one decision means whichever loses is a
+setting that silently does nothing — a `PERF_PROFILE` left on a task from an
+earlier run would have quietly beaten what someone typed into the portal:
+
+```
+▸ NOTE: PERF_PROFILE='short' is ignored — the run is chosen by the portal's Profile field.
+        Enter 'short' under Profile when you start the run.
 ```
 
 #### How the profile differs from every other ladder
