@@ -238,10 +238,23 @@ describe("the CDP portal's one text field", () => {
     assert.ok(!phases.some((key) => key.startsWith('saturate_')))
   })
 
-  test('an explicit PERF_PROFILE beats the portal field', () => {
-    // Someone who set both meant the more specific knob.
+  test('a stale PERF_PROFILE cannot override the portal field', () => {
+    // TEST_SCENARIO is the ONLY knob. Two knobs for one decision means whichever
+    // loses is a setting that silently does nothing — and a PERF_PROFILE left on
+    // a task from an earlier run would have quietly beaten what someone typed
+    // into the portal, with nothing in the output saying so.
     const phases = phasesIn(run({ TEST_SCENARIO: 'short', PERF_PROFILE: 'standard' }))
+    assert.ok(
+      phases.every((key) => key.startsWith('saturate_')),
+      'TEST_SCENARIO=short must win over a leftover PERF_PROFILE'
+    )
+  })
+
+  test('and PERF_PROFILE alone selects nothing', () => {
+    // It is ignored rather than honoured, so it must not quietly work either.
+    const phases = phasesIn(run({ PERF_PROFILE: 'short' }))
     assert.ok(phases.some((key) => key.startsWith('journey_')))
+    assert.ok(!phases.some((key) => key.startsWith('saturate_')))
   })
 
   test('unset runs the whole suite', () => {
@@ -363,7 +376,11 @@ describe('entrypoint.sh derives the same schedule this config does', () => {
           ...process.env,
           JM_HOME: ROOT,
           ENVIRONMENT: 'local',
-          PERF_PROFILE: name,
+          // TEST_SCENARIO, not PERF_PROFILE: the portal's field is the only knob
+          // the entrypoint takes, so driving it any other way would test a path
+          // no real run uses.
+          TEST_SCENARIO: name,
+          PERF_PROFILE: '',
           PERF_DUMP_SCHEDULE: 'true'
         },
         stdio: ['ignore', 'pipe', 'ignore']
@@ -410,6 +427,29 @@ describe('entrypoint.sh derives the same schedule this config does', () => {
 })
 
 describe('the committed plan', () => {
+  test('no typed prop carries a ${...} expression', () => {
+    // `intProp`, `longProp` and `boolProp` are parsed as literals the moment
+    // JMeter loads the XML, so a property function inside one fails the ENTIRE
+    // plan before a single sampler runs:
+    //
+    //   NumberFormatException: For input string: "${__P(saturateGateTimeoutMs,120000)}"
+    //
+    // Nothing catches that until JMeter itself parses the file, which is a
+    // container away from here — so this is the cheap stand-in. A value that
+    // has to be substituted belongs in a stringProp; JMeter coerces it at run
+    // time. (This is a real bug the saturation SyncTimer shipped with.)
+    const jmx = readFileSync(join(ROOT, 'scenarios', 'bng-perf.jmx'), 'utf8')
+    const offenders = [
+      ...jmx.matchAll(/<(intProp|longProp|boolProp)\s+name="([^"]+)">([^<]*)<\/\1>/g)
+    ].filter(([, , , value]) => value.includes('${'))
+    assert.deepEqual(
+      offenders.map(([, tag, name, value]) => `${tag} ${name}=${value}`),
+      [],
+      'these must be stringProp, or JMeter will refuse to load the plan'
+    )
+  })
+
+
   test('bng-perf.jmx and ladders.sh are in step with ladders.config.mjs', () => {
     // The generated half of the plan is committed, so it can go stale the
     // moment someone edits the config without re-running the generator. This

@@ -718,7 +718,7 @@ run is meaningless.
 | `SIZE_RAMP_LOOPS`                | `1`                                            | Weighted passes over the four sizes.                            |
 | `SIZE_LOOPS_{NORMAL,BUSY,LARGE,XLARGE}` | `20/8/3/2`                            | Samples per size in a pass. Weighted so small files earn a percentile. |
 | `SIZE_RAMP_DELAY_SECONDS`        | _derived_                                      | When the size ramp starts.                                      |
-| `PERF_PROFILE`                   | `standard`                                     | The only profile. See [The profile](#the-profile--how-long-a-run-takes). |
+| ~~`PERF_PROFILE`~~               | —                                              | **Ignored.** Use `TEST_SCENARIO` — it is the only knob for what runs. |
 | `PERF_DUMP_SCHEDULE`             | unset                                          | `true` prints the resolved schedule and exits, touching nothing. |
 | `WINDOW_<step>`                  | _derived_                                      | Override one step's window, e.g. `WINDOW_journey_normal_10=30`. The timeline re-derives around it. |
 | `PHASE_GAP_SECONDS`              | _derived per phase_                            | Set it and every phase gets that uniform gap instead of its own drain time. |
@@ -1073,7 +1073,7 @@ the result lands in the CDP portal like every other run. That is the one thing
 the probe cannot do.
 
 ```sh
-PERF_PROFILE=short ./entrypoint.sh
+TEST_SCENARIO=short ./entrypoint.sh          # or: TEST_SCENARIO=short docker compose up --build
 ```
 
 It is called `short` for what it COSTS, because that name is typed by hand into
@@ -1105,7 +1105,7 @@ TEST_SCENARIO = short
 
 Historically `TEST_SCENARIO` selected a *plan* (`scenarios/<name>.jmx`) and
 nothing else. Typing a profile name into it was therefore quietly wrong:
-`short` matched no plan, fell back to `bng-perf`, left `PERF_PROFILE` unset,
+`short` matched no plan, fell back to `bng-perf`, left the profile at its default,
 and ran the full ~18-minute `standard` suite — with nothing but a `WARNING` on
 stderr to say so. It now accepts either, and says which it understood:
 
@@ -1117,7 +1117,18 @@ stderr to say so. It now accepts either, and says which it understood:
 An unknown value still falls back rather than failing the run — the base image
 bakes `ENV TEST_SCENARIO=test` for its own sample plan, and a stale placeholder
 must never break a task — but it now names both the plans and the profiles it
-knows, so a typo is obvious. An explicit `PERF_PROFILE` beats the field.
+knows, so a typo is obvious.
+
+`TEST_SCENARIO` is the **only** knob for what runs. `PERF_PROFILE` used to be a
+second one, and two knobs for one decision means whichever loses is a setting
+that silently does nothing — a `PERF_PROFILE` left on a task from an earlier run
+would have quietly beaten what someone typed into the portal. It is now ignored,
+with a note saying so:
+
+```
+▸ NOTE: PERF_PROFILE='short' is ignored — the run is chosen by TEST_SCENARIO alone.
+        Use TEST_SCENARIO=short instead.
+```
 
 #### How the profile differs from every other ladder
 

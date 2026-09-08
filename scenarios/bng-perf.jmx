@@ -7992,7 +7992,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 4 on one normal upload">
@@ -8019,7 +8019,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -8087,7 +8087,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 8 on one normal upload">
@@ -8114,7 +8114,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -8182,7 +8182,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 12 on one normal upload">
@@ -8209,7 +8209,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -8277,7 +8277,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 16 on one normal upload">
@@ -8304,7 +8304,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -8372,7 +8372,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 24 on one normal upload">
@@ -8399,7 +8399,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -8467,7 +8467,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 4 on one busy upload">
@@ -8494,7 +8494,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -8562,7 +8562,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 8 on one busy upload">
@@ -8589,7 +8589,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -8657,7 +8657,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 12 on one busy upload">
@@ -8684,7 +8684,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -8752,7 +8752,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 16 on one busy upload">
@@ -8779,7 +8779,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -8847,7 +8847,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 2 on one large upload">
@@ -8874,7 +8874,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -8942,7 +8942,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 4 on one large upload">
@@ -8969,7 +8969,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -9037,7 +9037,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 6 on one large upload">
@@ -9064,7 +9064,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -9132,7 +9132,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 8 on one large upload">
@@ -9159,7 +9159,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -9227,7 +9227,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 12 on one large upload">
@@ -9254,7 +9254,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -9322,7 +9322,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 2 on one xlarge upload">
@@ -9349,7 +9349,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -9417,7 +9417,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 3 on one xlarge upload">
@@ -9444,7 +9444,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -9512,7 +9512,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 4 on one xlarge upload">
@@ -9539,7 +9539,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>
@@ -9607,7 +9607,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
         <hashTree/>
         <SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
           <intProp name="groupSize">0</intProp>
-          <longProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</longProp>
+          <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 6 on one xlarge upload">
@@ -9634,7 +9634,7 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
               <stringProp name="-1447181394">200|503</stringProp>
             </collectionProp>
             <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
-            <boolProp name="Assertion.assume_success">false</boolProp>
+            <boolProp name="Assertion.assume_success">true</boolProp>
             <intProp name="Assertion.test_type">1</intProp>
           </ResponseAssertion>
           <hashTree/>

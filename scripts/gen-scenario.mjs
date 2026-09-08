@@ -228,7 +228,7 @@ function javaHash(value) {
   return String(BigInt.asIntN(INT32, BigInt(hash)))
 }
 
-function responseAssertion(indent, { name, field, testType, values }) {
+function responseAssertion(indent, { name, field, testType, values, assumeSuccess = false }) {
   const items = values
     .map(
       (v) => `${indent}    <stringProp name="${javaHash(v)}">${xml(v)}</stringProp>`
@@ -239,7 +239,7 @@ ${indent}  <collectionProp name="Asserion.test_strings">
 ${items}
 ${indent}  </collectionProp>
 ${indent}  <stringProp name="Assertion.test_field">${field}</stringProp>
-${indent}  <boolProp name="Assertion.assume_success">false</boolProp>
+${indent}  <boolProp name="Assertion.assume_success">${assumeSuccess}</boolProp>
 ${indent}  <intProp name="Assertion.test_type">${testType}</intProp>
 ${indent}</ResponseAssertion>
 ${indent}<hashTree/>`
@@ -386,11 +386,23 @@ function revalidateStep(step, defaults) {
  * The timeout is a deadlock guard, not a pacing knob: if a thread dies the
  * others must not wait on it for the rest of the run. It is set well above the
  * widest burst's window so it never fires in a healthy run.
+ *
+ * `stringProp`, NOT `longProp`, for the timeout. A longProp is parsed as a
+ * literal number the moment the XML loads, so a `${__P(...)}` inside one fails
+ * the whole plan before a single sampler runs:
+ *
+ *   NumberFormatException: For input string: "${__P(saturateGateTimeoutMs,120000)}"
+ *
+ * A stringProp defers it to run time, where JMeter's TestBean coercion turns
+ * the substituted text into the long the bean wants. That is why every other
+ * property-driven number in this plan is a stringProp — ConstantTimer.delay
+ * included — and it is the reason a plan can only be trusted once JMeter has
+ * actually loaded it. `groupSize` stays an intProp because it is a literal.
  */
 function syncTimer(indent) {
   return `${indent}<SyncTimer guiclass="TestBeanGUI" testclass="SyncTimer" testname="Burst gate — release all threads together">
 ${indent}  <intProp name="groupSize">0</intProp>
-${indent}  <longProp name="timeoutInMs">\${__P(saturateGateTimeoutMs,120000)}</longProp>
+${indent}  <stringProp name="timeoutInMs">\${__P(saturateGateTimeoutMs,120000)}</stringProp>
 ${indent}</SyncTimer>
 ${indent}<hashTree/>`
 }
@@ -457,7 +469,20 @@ function saturateStep(step, defaults) {
           name: 'Status 200 or 503 (503 is the load shed, not a failure)',
           field: 'Assertion.response_code',
           testType: ASSERT_MATCHES,
-          values: ['200|503']
+          values: ['200|503'],
+          // JMeter's "Ignore Status", and this ladder is what it is for.
+          //
+          // A sampler is marked failed by RESPONSE CODE before any assertion
+          // runs, and a PASSING assertion cannot un-fail it — assertions only
+          // ever fail a sample. So without this every refusal counted as an
+          // error: a first run of this profile reported 16.49% errors for a
+          // service that was behaving exactly as designed, and the CDP portal
+          // would have shown a correct run as red.
+          //
+          // assume_success clears that status BEFORE the assertion, so the
+          // assertion below is what decides. A 500, or a timeout, still fails
+          // — only the two outcomes named above pass.
+          assumeSuccess: true
         })
       )
     }),

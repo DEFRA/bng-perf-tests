@@ -165,34 +165,36 @@ profile_is_known() {
   return 1
 }
 
-# ── The portal's one text field ─────────────────────────────────────────────
+# ── One knob: TEST_SCENARIO ─────────────────────────────────────────────────
 # A CDP perf-test task is configured through a single free-text field, and it
 # reaches the container as TEST_SCENARIO — which is why this variable exists at
 # all: the base image bakes ENV TEST_SCENARIO=test for its own sample plan.
 #
-# It was only ever a PLAN selector (scenarios/<name>.jmx). That made typing a
-# profile name into it quietly wrong: `saturate` matched no plan, fell back to
-# bng-perf, left PERF_PROFILE unset, and ran the full ~18-minute `standard`
-# suite. The only clue was a WARNING on stderr, in a task log nobody reads when
-# the run looks like it worked.
+# It is the ONLY input this script takes for what to run. There was a second
+# knob, PERF_PROFILE, and two knobs for one decision is one too many: whichever
+# loses is a setting that silently does nothing. A PERF_PROFILE left on a task
+# from an earlier run would have quietly overridden whatever someone typed into
+# the portal, and nothing in the output would have said so.
 #
-# So the field now accepts EITHER. A value naming a known profile selects that
-# profile against the one plan — which needs nothing else, because every thread
-# group is already in the plan and a profile only sets thread counts. Anything
-# else keeps its original meaning as a plan name.
+# The field names EITHER a profile (see PERF_PROFILE_NAMES) or a plan
+# (scenarios/<name>.jmx). A profile runs the whole plan at that profile's thread
+# counts — which needs nothing else, because every thread group is already in
+# the plan and a profile only sets thread counts. A plan name runs that plan at
+# the default profile.
 #
-# An explicit PERF_PROFILE still wins: it is the more specific knob, and someone
-# who set both meant the one they named.
-if [ -z "${PERF_PROFILE}" ] && [ -n "${TEST_SCENARIO}" ] && profile_is_known "${TEST_SCENARIO}"; then
+# PERF_PROFILE below is the RESOLVED name. The rest of this script reads it, and
+# it is passed explicitly to the summariser; it is NOT read from the
+# environment.
+if [ -n "${PERF_PROFILE}" ]; then
+  echo "▸ NOTE: PERF_PROFILE='${PERF_PROFILE}' is ignored — the run is chosen by TEST_SCENARIO alone." >&2
+  echo "        Use TEST_SCENARIO=${PERF_PROFILE} instead." >&2
+fi
+
+PERF_PROFILE=${PERF_PROFILE_DEFAULT}
+if [ -n "${TEST_SCENARIO}" ] && profile_is_known "${TEST_SCENARIO}"; then
   echo "▸ TEST_SCENARIO='${TEST_SCENARIO}' names a profile rather than a plan — running the '${TEST_SCENARIO}' profile against bng-perf.jmx"
   PERF_PROFILE=${TEST_SCENARIO}
   SCENARIO=bng-perf
-fi
-
-PERF_PROFILE=${PERF_PROFILE:-${PERF_PROFILE_DEFAULT}}
-if ! profile_is_known "${PERF_PROFILE}"; then
-  echo "ERROR: unknown PERF_PROFILE '${PERF_PROFILE}' — expected one of: ${PERF_PROFILE_NAMES}" >&2
-  exit 1
 fi
 
 # Now the plan. An unknown name still falls back rather than failing the run, so
@@ -618,7 +620,16 @@ mint_token() {
   set +x
   echo "▸ minting a cdp-defra-id-stub token from ${STUB_BASE_URL}"
   MINT_ERR=$(mktemp)
-  BEARER_TOKEN=$(STUB_BASE_URL="${STUB_BASE_URL}" OIDC_REDIRECT_URI="${OIDC_REDIRECT_URI}" node "${JM_HOME}/scripts/get-stub-token.mjs" 2>"${MINT_ERR}")
+  # STUB_ISSUER_HOST is forwarded because the stub stamps the token's `iss` from
+  # the Host header of the /token request, and the backend rejects a token whose
+  # issuer is not the one its own discovery fetch named. Those disagree whenever
+  # the two reach the stub by different names — a containerised run minting via
+  # host.docker.internal against a backend that discovered via localhost — and
+  # every request then 401s with "Invalid bearer token". get-stub-token.mjs has
+  # always supported the override; it was simply never passed through, so that
+  # local topology could not authenticate at all. Unset (the CDP case, where
+  # everything shares one stub URL) it changes nothing.
+  BEARER_TOKEN=$(STUB_BASE_URL="${STUB_BASE_URL}" OIDC_REDIRECT_URI="${OIDC_REDIRECT_URI}" STUB_ISSUER_HOST="${STUB_ISSUER_HOST}" node "${JM_HOME}/scripts/get-stub-token.mjs" 2>"${MINT_ERR}")
   MINT_STATUS=$?
   cat "${MINT_ERR}" >&2
   if [ ${MINT_STATUS} -ne 0 ] || [ -z "${BEARER_TOKEN}" ]; then
@@ -1028,6 +1039,17 @@ REPORTFILE=${NOW}-perftest-${SCENARIO}-report.csv
 LOGFILE=${JM_LOGS}/perftest-${SCENARIO}.log
 
 # -f forces JMeter to overwrite an existing results file / report folder.
+# JMeter's -o refuses a non-empty output directory, and cleans it itself when it
+# can. It cannot here: ./reports is a bind mount in a local `docker compose up`,
+# and removing the mount point is not allowed —
+#   Cannot write to '/opt/perftest/reports' as folder is not empty and cleanup
+#   failed with error:/opt/perftest/reports: Resource busy
+# A CDP task never sees this, because every task starts on a fresh filesystem.
+# A local run does, on the SECOND run and every one after it: the previous run's
+# report is still sitting there and JMeter dies before a single sampler fires.
+# Emptying the CONTENTS rather than the directory works in both cases.
+rm -rf "${JM_REPORTS:?}"/* "${JM_REPORTS:?}"/.[!.]* 2>/dev/null || true
+
 jmeter -n -t ${SCENARIOFILE} -e -l "${REPORTFILE}" -o ${JM_REPORTS} -j ${LOGFILE} -f \
   -Jenv="${ENVIRONMENT}" \
   -JfrontendDomain="${FRONTEND_DOMAIN}" \
@@ -1056,6 +1078,7 @@ if [ -f "${REPORTFILE}" ]; then
   SIZE_RAMP_EXPECTED="${SIZE_RAMP_EXPECTED},xlarge:$(( SIZE_LOOPS_XLARGE * SIZE_RAMP_LOOPS * SIZE_RAMP_THREADS ))"
   SIZE_RAMP_EXPECTED="${SIZE_RAMP_EXPECTED}" \
   SIZE_RAMP_WINDOW_SECONDS="${SIZE_RAMP_DURATION_SECONDS}" \
+  PERF_PROFILE="${PERF_PROFILE}" \
     node "${JM_HOME}/scripts/summarise-run.mjs" "${REPORTFILE}" || \
     echo "WARNING: could not summarise ${REPORTFILE}" >&2
   set -x
