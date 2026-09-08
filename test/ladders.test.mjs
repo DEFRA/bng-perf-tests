@@ -303,15 +303,26 @@ describe('the saturation cutoff', () => {
     assert.deepEqual(kept, all.slice(0, kept.length))
   })
 
-  test('the run reaches xlarge, with enough rungs to bracket a knee', () => {
-    // The whole point of the weighting: a single xlarge rung brackets nothing.
-    const xlarge = phasesWithinCutoff('short').filter((p) =>
-      p.key.startsWith('saturate_xlarge_')
-    )
-    assert.ok(
-      xlarge.length >= 2,
-      `expected at least 2 xlarge rungs inside the cutoff, got ${xlarge.length}`
-    )
+  test('every size that runs at all gets enough rungs to bracket a knee', () => {
+    // A single rung brackets nothing: it can say "refused here" or "clear here",
+    // never "clear at N, refused at M". So a size is either measured properly or
+    // reported as not measured — a lone rung is the useless middle, and it looks
+    // like data.
+    //
+    // This deliberately does NOT pin which sizes run. That is a weighting
+    // decision in the profile, and it has changed once already: an earlier mix
+    // guaranteed two xlarge rungs, and tightening normal/busy to get quotable
+    // knees spent that budget. What must hold either way is that whatever runs
+    // is interpretable.
+    const bySize = new Map()
+    for (const phase of phasesWithinCutoff('short')) {
+      const size = phase.key.replace('saturate_', '').replace(/_\d+$/, '')
+      bySize.set(size, (bySize.get(size) ?? 0) + 1)
+    }
+    assert.ok(bySize.size > 0, 'the profile must run something')
+    for (const [size, count] of bySize) {
+      assert.ok(count >= 2, `${size} has only ${count} rung inside the cutoff`)
+    }
   })
 
   test('the saturation ladder climbs within each size', () => {

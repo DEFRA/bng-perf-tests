@@ -193,8 +193,8 @@ export const LADDERS = [
       // 2-vCPU box (normal 10-12, large 4-6). A CDP task with more cores runs
       // 2 workers instead of 1, so the knee moves UP — hence steps well past
       // the local numbers rather than tight around them.
-      normal: { steps: [4, 8, 12, 16, 24], secondsPerBurst: 7 },
-      busy: { steps: [4, 8, 12, 16], secondsPerBurst: 9 },
+      normal: { steps: [4, 8, 10, 12, 14, 16, 24], secondsPerBurst: 7 },
+      busy: { steps: [4, 8, 10, 12, 14, 16], secondsPerBurst: 9 },
       large: { steps: [2, 4, 6, 8, 12], secondsPerBurst: 17 },
       xlarge: { steps: [2, 3, 4, 6], secondsPerBurst: 31 }
     }
@@ -342,14 +342,26 @@ export const PROFILES = {
        * mix is what fits in the default five minutes.
        */
       saturate: {
-        // `normal` runs 8/16/24 rather than a rung at 12 as well. One rung of
-        // this ladder is one rung of xlarge's, and a single xlarge rung brackets
-        // nothing — two is the minimum that says "clear here, refused there".
-        // Losing precision on the CHEAPEST size to buy a bracket on the most
-        // expensive one is the right trade, and `normal` is the size the
-        // standalone probe re-measures in seconds anyway.
-        normal: [8, 16, 24],
-        busy: [8, 16],
+        /**
+         * Weighted for a QUOTABLE knee on the two sizes whose brackets were too
+         * wide to be useful, at the cost of reach at the top.
+         *
+         * Measured (2-vCPU box, 1 worker): `large` agreed exactly across three
+         * runs and two independent instruments — clear at 4, refused at 6 — so
+         * its bracket is already tight. `normal` and `busy` were not: `normal`
+         * refused at 12 under the standalone probe, at 24 in one JMeter run and
+         * at 16 in the next, and `busy` had nothing between a clean 8 and a 44%
+         * 16. Contiguous rungs at 10/12/14 turn "somewhere between 8 and 16"
+         * into a number.
+         *
+         * The cost is real and is the reason this is a deliberate trade rather
+         * than a free improvement: four extra rungs push `large`'s widest rung
+         * and ALL of `xlarge` past the 300 s cutoff, so this run establishes no
+         * upper bound for the biggest file. Raising `cutoffSeconds` is what buys
+         * both — see phasesWithinCutoff.
+         */
+        normal: [8, 10, 12, 14, 16, 24],
+        busy: [8, 10, 12, 14, 16],
         large: [2, 4, 6, 8],
         xlarge: [2, 3, 4, 6]
       }

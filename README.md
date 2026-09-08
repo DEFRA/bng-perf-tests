@@ -1159,6 +1159,16 @@ That is why the ladder lists rungs it usually cannot reach, `xlarge` included.
 removes is past-saturation detail whose shape is already established.
 Truncation degrades gracefully here in a way it would not for a latency ladder.
 
+The default mix spends its five minutes on **contiguous rungs for `normal` and
+`busy`** (8/10/12/14/16), because those were the two sizes whose brackets were
+too wide to quote — `normal` refused at 12 under the standalone probe, at 24 in
+one JMeter run and at 16 in the next. `large` needs less: three runs and two
+independent instruments all put it at clear-at-4, refused-at-6.
+
+The cost is that `xlarge` no longer runs at all under the default cutoff, so a
+default run establishes **no upper bound for the largest file**. Raise
+`cutoffSeconds` to buy it back.
+
 #### Seeing the knee in the JMeter dashboard
 
 Two built-in views show it, and the run's own summary points at both:
