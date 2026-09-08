@@ -158,9 +158,7 @@ export const LADDERS = [
      * Every other ladder in this file is calibrated to sit below the knee and
      * asserts `Status 200`, so a 503 is a run failure. This one is the opposite
      * question — it climbs deliberately past the point where the validator
-     * sheds load, and a 503 is the DATA rather than a failure. It is the JMeter
-     * peer of scripts/saturation-probe.mjs, and it exists because the probe
-     * cannot publish to the CDP portal on a schedule.
+     * sheds load, and a 503 is the DATA rather than a failure.
      *
      * ── Why this one is BURST driven ─────────────────────────────────────────
      *
@@ -189,10 +187,11 @@ export const LADDERS = [
     burst: true,
     bursts: 1,
     sizes: {
-      // Steps bracket the knee measured by scripts/saturation-probe.mjs on a
-      // 2-vCPU box (normal 10-12, large 4-6). A CDP task with more cores runs
-      // 2 workers instead of 1, so the knee moves UP — hence steps well past
-      // the local numbers rather than tight around them.
+      // Steps bracket the knee as measured on a 2-vCPU box (normal 10-16,
+      // large 4-6). The pool clamps to availableParallelism() - 1, so that box
+      // ran ONE worker; a CDP task with more cores runs the default 2 and the
+      // knee moves up. Hence steps well past the local numbers rather than
+      // tight around them.
       normal: { steps: [4, 8, 10, 12, 14, 16, 24], secondsPerBurst: 7 },
       busy: { steps: [4, 8, 10, 12, 14, 16], secondsPerBurst: 9 },
       large: { steps: [2, 4, 6, 8, 12], secondsPerBurst: 17 },
@@ -346,11 +345,10 @@ export const PROFILES = {
          * Weighted for a QUOTABLE knee on the two sizes whose brackets were too
          * wide to be useful, at the cost of reach at the top.
          *
-         * Measured (2-vCPU box, 1 worker): `large` agreed exactly across three
-         * runs and two independent instruments — clear at 4, refused at 6 — so
-         * its bracket is already tight. `normal` and `busy` were not: `normal`
-         * refused at 12 under the standalone probe, at 24 in one JMeter run and
-         * at 16 in the next, and `busy` had nothing between a clean 8 and a 44%
+         * Measured (2-vCPU box, 1 worker): `large` came back clear-at-4,
+         * refused-at-6 on every run, so its bracket is already tight. `normal`
+         * and `busy` were not: `normal` first refused at 24 on one run and at
+         * 16 on the next, and `busy` had nothing between a clean 8 and a 44%
          * 16. Contiguous rungs at 10/12/14 turn "somewhere between 8 and 16"
          * into a number.
          *

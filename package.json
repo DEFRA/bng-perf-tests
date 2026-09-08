@@ -13,7 +13,6 @@
     "gen-fixtures": "node scripts/gen-fixtures.mjs",
     "gen-scenario": "node scripts/gen-scenario.mjs",
     "check-scenario": "node scripts/gen-scenario.mjs --check",
-    "saturation": "node scripts/saturation-probe.mjs",
     "test": "node --test \"test/**/*.test.mjs\""
   },
   "dependencies": {

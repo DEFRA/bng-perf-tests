@@ -972,127 +972,80 @@ docker compose up --build
 * On Docker Desktop `host.docker.internal` resolves to the host natively; on Linux
   the compose file adds the `host-gateway` mapping so it resolves there too.
 
-## Finding the saturation point — `npm run saturation`
+## Finding the saturation point — the `short` profile
 
-Everything else in this repo is calibrated to sit **below** the knee. Every
-validate leg of every JMeter ladder asserts `Status 200`, so a 503 there is a run
-failure rather than a recorded data point. That is the right call for a suite
-whose job is to measure latency, and the wrong tool for the question *"how many
-concurrent uploads can this instance take before it starts refusing them?"*
+Every other ladder in this suite is calibrated to sit **below** the knee. Every
+validate leg asserts `Status 200`, so a 503 there is a run failure. That is the
+right call for a suite whose job is to measure latency, and the wrong tool for
+the question *"how many concurrent uploads can this instance take before it
+starts refusing them?"*
 
-Nothing in the suite measured that. The refusal thresholds were only ever
-*derived* from the backend's config:
+Nothing measured that. The refusal thresholds were only ever *derived* from the
+backend's config:
 
 | Ceiling | Arithmetic | At the shipped defaults |
 | --- | --- | --- |
-| Admission cap | `VALIDATION_WORKER_COUNT` + `VALIDATION_WORKER_QUEUE_LIMIT` | 2 + 8 = **10 in flight** |
-| Parse budget | `VALIDATION_PARSE_BUDGET_BYTES` ÷ (2 MB + 10 × file size) | 550 MiB ÷ 43 MB ≈ **13** for `large` |
+| Depth | `VALIDATION_WORKER_COUNT` + `VALIDATION_WORKER_QUEUE_LIMIT`, where workers clamp to `availableParallelism() - 1` | 2 + 8 = **10 in flight** |
+| Time | a job waiting longer than `VALIDATION_QUEUE_WAIT_LIMIT_MS` is refused rather than started | **5 s** |
+| Memory | `VALIDATION_PARSE_BUDGET_BYTES` ÷ (2 MB + 10 × file size) | 550 MiB ÷ 43 MB ≈ **13** for `large` |
 
-whichever binds first — so at the defaults the pool refuses before the budget
-does for everything except `xlarge`. `scripts/saturation-probe.mjs` **measures**
-it rather than inferring it.
-
-It climbs a ladder of concurrency levels, fires each level as a *simultaneous
-burst* at `/baseline/validate/{uploadId}`, and reports where 503s first appear:
-
-```bash
-# against a local stack (backend :3001, uploader :7337, stub :3200)
-npm run saturation
-
-# a specific file size, a narrower ladder, more samples per rung
-npm run saturation -- --size xlarge --ladder 2,4,5,6,8 --rounds 3
-
-# regression guard: non-zero exit unless the service is still clear to 10
-npm run saturation -- --expect-clear-to 10 --json reports/saturation.json
-
-npm run saturation -- --help
-```
-
-The file is uploaded and virus-scanned **once**, because
-`/baseline/validate/{uploadId}` re-reads the object from S3 on every call — the
-same trick `stage-uploads.mjs` plays for the `revalidate` ladder. Each request in
-a burst gets its **own project**, because concurrent writes to one project
-serialise on a row lock and would measure the lock rather than the refusal.
-`--no-project` drops the `projectId` altogether: validation then stops after the
-geometry checks, no project pool is needed, and the worker pool and parse budget
-are isolated from the database. Both are worth running — the first is the number
-a user would hit, the second is the validator's own ceiling.
-
-### Reading the output
-
-```
-users  sent  200  503 busy  503 rss  409  err  refused  inflight    p50     p95
------  ----  ---  --------  -------  ---  ---  -------  --------  -----  ------
-    8     8    8         0        0    0    0       0%         8  510ms  1011ms
-   10    10   10         0        0    0    0       0%        10  756ms  1256ms
-   12    12   10         2        0    0    0      17%        12  505ms  1256ms
-
-Clear to 10 concurrent; first refusal at 12.
-```
-
-* **`clear to N`** is the number to quote as capacity and to guard against — the
-  last level at which nothing was turned away. The knee lies between it and the
-  first refused rung, so **the gap between them is the measurement's error bar**;
-  narrow the ladder there to tighten it.
-* **`503 busy` vs `503 rss`** are split on the body, not the status. The first is
-  `VALIDATION_BUSY` — the validator shedding load on purpose, which is what the
-  probe is looking for. The second is Hapi's RSS limit refusing the request
-  before the route ran; at the shipped `VALIDATION_MAX_RSS_BYTES=0` it is
-  disabled, so seeing one is itself the finding.
-* **`inflight`** is the peak concurrency measured *at the client*. It is the
-  honesty check on the whole instrument: a rung labelled 24 that only ever got 9
-  requests overlapping was never offered 24, and its refusal count says nothing
-  about the service.
-* **`409`** means the probe's own project pool was too small and two requests
-  shared a project. That rung measured the row lock, not the validator.
-
-### What the probe cannot see
-
-The 503 body carries **no reason**. `no_capacity`, `queue_full`, `queue_wait` and
-`memory_budget` are deliberately kept off the wire and go to the
-`GeoPackageValidationBusy` metric and a `warn` line instead. Which of the four
-fired is the difference between "add workers" and "the files are too big for the
-budget", so attribute it from the backend side of the run:
-
-```bash
-grep "validation refused as busy" <backend log>
-```
-
-or slice `GeoPackageValidationBusy` by `reason` in CloudWatch.
-
-### The probe and the `short` profile
-
-There are two ways to get this number, and they have different jobs.
-
-The **probe** is the instrument. It iterates in seconds, needs nothing but Node,
-fires an exact burst and waits for it to finish however long that takes, and
-exits non-zero with `--expect-clear-to` so CI can guard the figure.
-
-The **`short` JMeter profile** answers the same question inside the suite, so
-the result lands in the CDP portal like every other run. That is the one thing
-the probe cannot do.
+The lowest of the three is the knee. The `short` profile **measures** it.
 
 ```sh
 TEST_SCENARIO=short ./entrypoint.sh          # or: TEST_SCENARIO=short docker compose up --build
 ```
 
+It climbs a ladder of concurrency levels, fires each as a *simultaneous burst*
+at `/baseline/validate/{uploadId}`, and reports the level it stayed clear to and
+the level it began shedding — ~5 minutes, all four file sizes listed.
+
 It is called `short` for what it COSTS, because that name is typed by hand into
-the portal and a short name is a name people get right. What it DOES is
-saturation — it drives the service until it starts refusing work — so every
-place the profile is announced says so:
+the CDP portal and a short name is a name people get right. What it DOES is
+saturation, so every place the profile is announced says so:
 
 ```
-  profile:  short — 11 ladder phase(s), 300s cutoff — the ladder is truncated to fit
+  profile:  short — 14 ladder phase(s), 300s cutoff — the ladder is truncated to fit
 ```
 
 If you want a quick smoke run rather than a deliberate overload, `short` is not
 it. Narrow `standard` with the per-phase env knobs instead.
 
-It is a separate profile rather than a phase of `standard` because it is a
-different question, not a different sampling depth of the same one — different
-pass rule (a 503 is data), different step shape (bursts, not closed loops), and
-a cutoff instead of a budget. Folding it into `standard` would make `standard`
-mean two things, and would blow its hard twenty-minute ceiling.
+### Reading the output
+
+```
+  size    burst  sent  served  503 busy  refused  p95    worst
+  large   2      2     2       0         0%       9.2s   9.2s
+  large   4      4     4       0         0%       15.0s  15.0s
+  large   6      6     5       1         17%      21.1s  21.1s
+  large   8      8     5       3         38%      20.2s  20.2s
+
+  large: clear to a burst of 4; first refusal at 6.
+```
+
+* **`clear to N`** is the number to quote as capacity — the last level at which
+  nothing was turned away. The knee lies between it and the first refused rung,
+  so **the gap between them is the measurement's error bar**.
+* The latency columns cover the **served** requests only. A refusal returns in
+  about a second, so folding them in would make a saturating rung look *faster*
+  than a healthy one.
+* `N` is **concurrent validations, not concurrent users**. A queue slot and its
+  parse-budget credit are held only while the file is being validated — someone
+  waiting on a virus scan holds neither — so the number of simultaneous users
+  the service supports is higher than this figure.
+* The ceilings are **per instance**. Two tasks means two independent budgets, so
+  capacity scales with instance count.
+
+### What the run cannot see
+
+The 503 body carries **no reason**. `no_capacity`, `queue_full`, `queue_wait`
+and `memory_budget` are deliberately kept off the wire and go to the
+`GeoPackageValidationBusy` metric and a `warn` line instead. Which fired is the
+difference between "add workers" and "the files are too big for the budget", so
+attribute it from the backend side:
+
+```sh
+grep "validation refused as busy" <backend log>
+```
 
 #### Running it from the CDP Portal
 
@@ -1161,9 +1114,8 @@ Truncation degrades gracefully here in a way it would not for a latency ladder.
 
 The default mix spends its five minutes on **contiguous rungs for `normal` and
 `busy`** (8/10/12/14/16), because those were the two sizes whose brackets were
-too wide to quote — `normal` refused at 12 under the standalone probe, at 24 in
-one JMeter run and at 16 in the next. `large` needs less: three runs and two
-independent instruments all put it at clear-at-4, refused-at-6.
+too wide to quote — `normal` first refused at 24 on one run and at 16 on the
+next. `large` needs less: every run put it at clear-at-4, refused-at-6.
 
 The cost is that `xlarge` no longer runs at all under the default cutoff, so a
 default run establishes **no upper bound for the largest file**. Raise
