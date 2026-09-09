@@ -270,7 +270,7 @@ profile_value() {
 # The everyday groups, the quiet probe baseline and the size ramp exist to give
 # a standard run its CONTEXT: what an ordinary user sees while the load phases
 # run, and what one validate costs uncontended. A saturation run wants none of
-# it. They would be ~55s of a 300s cutoff, and — the part that actually matters
+# it. They would be ~55s spent off-question, and — the part that matters more
 # — they are LOAD ON THE SERVICE while it is being pushed to its refusal point,
 # which contaminates the very measurement the profile exists to take.
 #
@@ -628,9 +628,16 @@ eval "BANNER_BUDGET_SECONDS=\${PROFILE_BUDGET_SECONDS_${PERF_PROFILE}:-0}"
 if [ "${BANNER_BUDGET_SECONDS}" -gt 0 ]; then
   BANNER_BUDGET="budget $((BANNER_BUDGET_SECONDS / 60)) min incl. setup"
 elif [ "${PROFILE_CUTOFF_SECONDS}" -gt 0 ]; then
-  # A cutoff is not the absence of a budget, it is a different kind of one: the
-  # ladder deliberately lists more than it can run and is truncated to fit.
-  BANNER_BUDGET="${PROFILE_CUTOFF_SECONDS}s cutoff — the ladder is truncated to fit"
+  # A cutoff is not the absence of a budget, it is a different kind of one: it
+  # bounds the run by dropping whatever does not fit. Whether it actually drops
+  # anything is a property of the ladder, not of the cutoff, so the banner reads
+  # it off PROFILE_SKIPPED rather than assuming — a run that says "truncated"
+  # when it measured everything sends the reader looking for missing rungs.
+  if [ -n "${PROFILE_SKIPPED}" ]; then
+    BANNER_BUDGET="${PROFILE_CUTOFF_SECONDS}s cutoff — the ladder is truncated to fit"
+  else
+    BANNER_BUDGET="${PROFILE_CUTOFF_SECONDS}s cutoff — the whole ladder fits inside it"
+  fi
 else
   BANNER_BUDGET="no budget — this profile is meant to be long"
 fi

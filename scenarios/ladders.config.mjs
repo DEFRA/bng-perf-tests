@@ -192,7 +192,18 @@ export const LADDERS = [
       // ran ONE worker; a CDP task with more cores runs the default 2 and the
       // knee moves up. Hence steps well past the local numbers rather than
       // tight around them.
-      normal: { steps: [4, 8, 10, 12, 14, 16, 24], secondsPerBurst: 7 },
+      //
+      // `normal`'s 32/48/64 are a deliberately COARSE bracket rather than more
+      // contiguous rungs. On 4 vCPU it served 24/24 with nothing refused, and
+      // its knee cannot be extrapolated the way the other sizes' can: the model
+      // that fits them — served ~= workers x (1 + 5000 ms / service time) —
+      // needs a service time, and `normal`'s geometry step vanishes into the
+      // fixed pipeline cost (every rung from 10 to 16 came back at a flat
+      // ~1.5 s). So the knee could be anywhere from the low 30s to past 64, and
+      // contiguous rungs placed by guesswork would likely all land the same
+      // side of it. Bracket first, then fill in contiguous rungs on a follow-up
+      // run — the path `normal` and `busy` already took to earn their 10/12/14.
+      normal: { steps: [4, 8, 10, 12, 14, 16, 24, 32, 48, 64], secondsPerBurst: 7 },
       busy: { steps: [4, 8, 10, 12, 14, 16], secondsPerBurst: 9 },
       large: { steps: [2, 4, 6, 8, 12], secondsPerBurst: 17 },
       xlarge: { steps: [2, 3, 4, 6], secondsPerBurst: 31 }
@@ -295,27 +306,48 @@ export const PROFILES = {
      * ladders.sh both print, so a run always says which question it answered.
      */
     description:
-      'SATURATION — the saturation ladder only, climbing past the knee until a five-minute cutoff stops it',
+      'SATURATION — the saturation ladder only, climbing past the knee at all four file sizes, inside a ten-minute cutoff',
     /**
      * A CUTOFF, not a budget, and the difference is the point.
      *
      * `budgetMinutes` is a promise the profile keeps: a test fails if the
      * standard profile projects over it, so a step that will not fit forces a
-     * decision here. This profile makes no such promise. Its ladder lists more
-     * than five minutes can do on purpose, and `phasesWithinCutoff` truncates
-     * it — so it has no budget to check, and the cutoff is what bounds the run.
+     * decision here. This profile makes no such promise. Its ladder lists what
+     * it lists, and `phasesWithinCutoff` truncates whatever will not fit — so
+     * it has no budget to check, and the cutoff is what bounds the run.
      *
-     * Five minutes because that is what makes this schedulable next to a
-     * twenty-minute standard run without competing with it, and because the
-     * knee is found in the first minute or two: the rungs a cutoff removes are
-     * the ones whose answer is already known.
+     * ── Why 600 rather than something tighter ────────────────────────────────
+     *
+     * It was 300, which kept a contiguous prefix of 14 rungs and silently
+     * dropped the last five: `large @ 8` and ALL FOUR `xlarge` rungs. So the
+     * 9.3 MB file had never been saturation-tested in any run, and neither had
+     * `large`'s widest rung — the fixture is staged and `UPLOAD_SIZES` defaults
+     * to all four sizes, so the cutoff was the only thing in the way. That was
+     * a deliberate trade when contiguous 10/12/14 rungs were added to `normal`
+     * and `busy`, and it aged badly: on 4 vCPU `large` served all six rungs
+     * with zero refusals, so the ladder no longer reached the knee for either
+     * of the two biggest files.
+     *
+     * The whole ladder as it now stands is 525 s: 474 s of the pre-existing
+     * rungs, plus 51 s for `normal`'s three new ones at 17 s each (12 s window
+     * + 5 s gap). So anything from 525 up runs it in full.
+     *
+     * 600 rather than 540 because THE CUTOFF IS A CEILING, NOT A DURATION. It
+     * only decides which rungs are kept; it never pads a run, so every value at
+     * or above the ladder's length produces an identical run and headroom is
+     * free. At 540 the margin would be 15 s — one change to a window or a gap
+     * and the `xlarge` tail silently drops off the end again, which is the
+     * exact failure this is fixing. At 600 the margin is 75 s, and the run
+     * still finishes in 525 s plus the SETUP_ALLOWANCE_SECONDS staging and
+     * publishing: ~10 minutes end to end, comfortably under half the 20-minute
+     * `standard` run, which is the property this profile was sized for.
      */
     budgetMinutes: null,
-    cutoffSeconds: 300,
+    cutoffSeconds: 600,
     /**
      * No home page, no project list, no create load, no background probe, no
      * size ramp. All of those exist to give the standard run its context, and
-     * here they would be 55 s of a 300 s budget spent measuring something this
+     * here they would be 55 s of the cutoff spent measuring something this
      * profile is not asking about — and load on the service while it does it,
      * which for a saturation test is contamination rather than context.
      */
@@ -327,40 +359,50 @@ export const PROFILES = {
       edit: {},
       editContention: [],
       /**
-       * Weighted so the run REACHES xlarge, rather than simply listing it.
+       * Every rung the ladder lists for a size, minus the cheapest few.
        *
-       * The cutoff keeps a contiguous prefix, so a profile that asked for every
-       * rung of every size would spend its whole five minutes on `normal` and
-       * `busy` and never attempt the two sizes most likely to be refused. The
-       * cheap sizes are therefore thinned here — they knee highest and cost
-       * least to re-run — and `large` and `xlarge` keep the rungs that bracket
-       * their knee.
+       * The `4` rung of `normal` and `busy` and `large @ 12` are the only steps
+       * left out. The first two refuse nothing on any box that has ever run
+       * this and cost 17-19 s each to re-confirm a zero; the third is held in
+       * reserve — see the note on `large` below.
        *
-       * The ladder above still lists the full step set. Raising this profile's
-       * `cutoffSeconds` and regenerating is what buys those extra rungs; this
-       * mix is what fits in the default five minutes.
+       * This used to be a much thinner mix, because at a 300 s cutoff a profile
+       * that asked for every rung would have spent the whole run on `normal`
+       * and `busy` and never attempted the two sizes most likely to be refused.
+       * At 600 s the whole thing fits with 75 s to spare, so there is nothing
+       * left to trade away.
        */
       saturate: {
         /**
-         * Weighted for a QUOTABLE knee on the two sizes whose brackets were too
-         * wide to be useful, at the cost of reach at the top.
+         * 32/48/64 measure the one number the ladder has never produced.
          *
-         * Measured (2-vCPU box, 1 worker): `large` came back clear-at-4,
-         * refused-at-6 on every run, so its bracket is already tight. `normal`
-         * and `busy` were not: `normal` first refused at 24 on one run and at
-         * 16 on the next, and `busy` had nothing between a clean 8 and a 44%
-         * 16. Contiguous rungs at 10/12/14 turn "somewhere between 8 and 16"
-         * into a number.
+         * `normal` (143 KB, 80 parcels) is the everyday file — the size most
+         * real uploads will be — so where it starts refusing is arguably the
+         * most operationally useful number here. On 4 vCPU it served 24/24 with
+         * zero refusals at the widest rung that existed, so all the ladder can
+         * say today is "more than 24", and the knee cannot be extrapolated (see
+         * the step list in LADDERS for why). The bracket is coarse on purpose.
          *
-         * The cost is real and is the reason this is a deliberate trade rather
-         * than a free improvement: four extra rungs push `large`'s widest rung
-         * and ALL of `xlarge` past the 300 s cutoff, so this run establishes no
-         * upper bound for the biggest file. Raising `cutoffSeconds` is what buys
-         * both — see phasesWithinCutoff.
+         * Worth going in with eyes open: a refusal at 48 or 64 may not come
+         * from where the others do. At those widths the main-thread pipeline —
+         * S3 download, GeoPackage parse, persistence — is doing far more work
+         * than the worker pool is, so the constraint may be the event loop
+         * rather than the queue. That would itself be the finding, and no
+         * narrower rung can surface it.
          */
-        normal: [8, 10, 12, 14, 16, 24],
+        normal: [8, 10, 12, 14, 16, 24, 32, 48, 64],
         busy: [8, 10, 12, 14, 16],
+        /**
+         * May still not bracket `large`: on 4 vCPU it served all six at burst 6
+         * cleanly, so burst 8 may come back clean too. The fallback is cheap —
+         * the ladder above already carries a `12` thread group, so switching it
+         * on here is one line and +27 s.
+         */
         large: [2, 4, 6, 8],
+        // Extrapolating from the ~2.1 s service time measured at `large` puts
+        // this knee near burst 4-6, so these rungs should bracket it. That is
+        // an extrapolation, not a measurement — which is the point of finally
+        // running them.
         xlarge: [2, 3, 4, 6]
       }
     },
@@ -455,10 +497,10 @@ export function generatedBlockStartSeconds(profileName) {
  * fit its budget, and a step that would not fit is a decision to take in this
  * file rather than something to discover at run time.
  *
- * `short` is deliberately the other way round. Its ladder LISTS more than a
- * five-minute run can do, up to and including `xlarge`, and the cutoff decides
- * how far up it actually gets. That is the right shape for a saturation test
- * for one specific reason: the ladder climbs, so the knee is near the BOTTOM,
+ * `short` is deliberately the other way round. It is bounded by a cutoff rather
+ * than by a budget, and the cutoff decides how far up the ladder a run actually
+ * gets. That is the right shape for a saturation test for one specific reason:
+ * the ladder climbs, so the knee is near the BOTTOM,
  * and everything a cutoff removes is past-saturation detail whose shape is
  * already established. Truncation degrades gracefully here in a way it would
  * not for a latency ladder.

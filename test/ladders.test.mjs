@@ -28,6 +28,7 @@ import {
   phasesBeyondCutoff,
   phasesWithinCutoff,
   profilePhases,
+  runSeconds,
   stepAllowanceSeconds,
   scheduleFrom,
   stepKey,
@@ -351,6 +352,21 @@ describe('the saturation cutoff', () => {
         `${phase.key} ends at ${phase.delay + phase.window}s, past the ${cutoff}s cutoff`
       )
     }
+  })
+
+  test('short reaches every rung it lists, with headroom to spare', () => {
+    // The property the 600 s cutoff buys. It used to be 300, which dropped the
+    // last five rungs — `large @ 8` and every `xlarge` rung, so the biggest
+    // fixture had never been saturation-tested at all.
+    //
+    // The margin is asserted as well as the fit, because the cutoff is a
+    // CEILING rather than a duration: raising it costs nothing when the ladder
+    // is shorter, and a run that only just fits is one window tweak away from
+    // silently losing its tail again. If this fails, either extend the cutoff
+    // or decide deliberately which rungs to drop.
+    assert.deepEqual(phasesBeyondCutoff('short'), [])
+    const margin = PROFILES.short.cutoffSeconds - runSeconds('short')
+    assert.ok(margin >= 30, `only ${margin}s of headroom under the cutoff`)
   })
 
   test('it keeps a contiguous PREFIX rather than cherry-picking what fits', () => {
