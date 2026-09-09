@@ -999,14 +999,14 @@ PROFILE=short ./entrypoint.sh                # or: PROFILE=short docker compose 
 
 It climbs a ladder of concurrency levels, fires each as a *simultaneous burst*
 at `/baseline/validate/{uploadId}`, and reports the level it stayed clear to and
-the level it began shedding — ~5 minutes, all four file sizes listed.
+the level it began shedding — ~10 minutes incl. setup, all four file sizes run.
 
 It is called `short` for what it COSTS, because that name is typed by hand into
 the CDP portal and a short name is a name people get right. What it DOES is
 saturation, so every place the profile is announced says so:
 
 ```
-  profile:  short — 14 ladder phase(s), 300s cutoff — the ladder is truncated to fit
+  profile:  short — 22 ladder phase(s), 600s cutoff — the whole ladder fits inside it
 ```
 
 If you want a quick smoke run rather than a deliberate overload, `short` is not
@@ -1123,7 +1123,7 @@ earlier run would have quietly beaten what someone typed into the portal:
 | Pass rule | `Status 200` | `Status 200 or 503` |
 | Step shape | N threads looping for a window | one simultaneous burst of N |
 | What ends a step | the window (a stopwatch) | its loop count (the work) |
-| Run length | fits a 20-minute budget | truncated by a 300 s cutoff |
+| Run length | fits a 20-minute budget | bounded by a 600 s cutoff |
 | Preamble | home / list / create / probe / size ramp | none |
 
 The **burst** is the part that matters. A closed loop is the wrong instrument
@@ -1137,22 +1137,35 @@ after its previous request returned, the gate also drains the previous round.
 The **cutoff** is what makes it schedulable. Steps are loop-count driven, so a
 step ends when its burst does and the window above it is only a safety net —
 which is what lets a saturation ladder live in a plan whose every other step is
-duration-driven. `phasesWithinCutoff` then keeps the contiguous prefix that fits
-300 s, and the rest simply never run.
+duration-driven. `phasesWithinCutoff` keeps the contiguous prefix that fits the
+cutoff, and anything past it simply never runs.
 
-That is why the ladder lists rungs it usually cannot reach, `xlarge` included.
-**The ladder climbs, so the knee is near the bottom** — everything a cutoff
-removes is past-saturation detail whose shape is already established.
-Truncation degrades gracefully here in a way it would not for a latency ladder.
+Truncation is safe here in a way it would not be for a latency ladder — **the
+ladder climbs, so the knee is near the bottom**, and what a cutoff removes is
+past-saturation detail whose shape is already established. But it is not free,
+and at 300 s it had stopped being cheap: the last five rungs were being dropped
+every run, `large @ 8` and **all four `xlarge` rungs** among them, so the 9.3 MB
+fixture had never been saturation-tested at all. The cutoff is now **600 s**,
+which the whole 525 s ladder fits inside with 75 s to spare.
 
-The default mix spends its five minutes on **contiguous rungs for `normal` and
-`busy`** (8/10/12/14/16), because those were the two sizes whose brackets were
-too wide to quote — `normal` first refused at 24 on one run and at 16 on the
-next. `large` needs less: every run put it at clear-at-4, refused-at-6.
+The cutoff is a **ceiling, not a duration**: it only decides which rungs are
+kept and never pads a run, so every value at or above the ladder's length
+produces an identical run and headroom costs nothing. That is why it is 600
+rather than the 540 that would just fit — 15 s of margin is one window tweak
+away from silently losing the tail again.
 
-The cost is that `xlarge` no longer runs at all under the default cutoff, so a
-default run establishes **no upper bound for the largest file**. Raise
-`cutoffSeconds` to buy it back.
+The mix runs **contiguous rungs for `normal` and `busy`** (8/10/12/14/16),
+because those were the two sizes whose brackets were too wide to quote —
+`normal` first refused at 24 on one run and at 16 on the next — plus a coarse
+**32 / 48 / 64** bracket on `normal`. That last one is the everyday file, and on
+4 vCPU it served 24/24 with nothing refused, so all we can say today is "more
+than 24"; its knee cannot be extrapolated either, because its geometry step
+disappears into the fixed pipeline cost (every rung from 10 to 16 came back at a
+flat ~1.5 s). Bracket coarsely first, fill in contiguous rungs on a follow-up —
+the path `normal` and `busy` already took. Be ready for the answer to come from
+somewhere new: at 48-64 concurrent uploads the main-thread pipeline is doing far
+more work than the worker pool, so the constraint may be the event loop rather
+than the queue. That would itself be the finding.
 
 #### Seeing the knee in the JMeter dashboard
 
@@ -1197,7 +1210,7 @@ table of what *was* measured, and reading one as the other publishes capacity
 that was never tested. So the summary names both, and distinguishes them:
 
 ```
-  NOT MEASURED — past the 300s cutoff, never attempted:
+  NOT MEASURED — past the 600s cutoff, never attempted:
     xlarge @ burst of 4, xlarge @ burst of 6
 
   NOT MEASURED — scheduled but produced NO samples. This is a
@@ -1207,13 +1220,15 @@ that was never tested. So the summary names both, and distinguishes them:
 ```
 
 The first is expected. The second means staging failed or a burst was cut off,
-and it would otherwise be invisible.
+and it would otherwise be invisible. At the current 600 s cutoff nothing is
+truncated, so the first heading should not appear at all — if it does, a window
+or a gap has grown and the tail is being cut off again.
 
-To buy the rungs the default cutoff cannot reach, raise `cutoffSeconds` on the
-`short` profile in `scenarios/ladders.config.mjs` and regenerate — the ladder
-already lists them. It is a generation-time decision, not a run-time one,
-because the truncated phase list is baked into the committed `ladders.sh` that
-`entrypoint.sh` sources:
+To add rungs, or to raise `cutoffSeconds` to reach them, edit the `short`
+profile in `scenarios/ladders.config.mjs` and regenerate. Both are
+generation-time decisions rather than run-time ones: the phase list is baked
+into the committed `ladders.sh` that `entrypoint.sh` sources, and a new burst
+width also needs its own thread group in the committed `.jmx`.
 
 ```sh
 npm run gen-scenario && npm run check-scenario

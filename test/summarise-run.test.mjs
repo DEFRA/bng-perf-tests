@@ -16,6 +16,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, describe, before } from 'node:test'
+import { phasesBeyondCutoff, profilePhases } from '../scenarios/ladders.config.mjs'
 
 const ROOT = join(import.meta.dirname, '..')
 const HEADERS = ['timeStamp', 'elapsed', 'label', 'responseCode', 'success', 'threadName']
@@ -318,9 +319,30 @@ describe('rungs that were never measured', () => {
     )
   })
 
-  test('a rung the cutoff never reached is named, not silently dropped', () => {
-    assert.match(partial, /NOT MEASURED — past the 300s cutoff, never attempted/)
-    assert.match(partial, /xlarge @ burst of 4/)
+  test('every rung that produced nothing is named under one heading or the other', () => {
+    // The invariant, whichever reason applies: a rung absent from the results
+    // must appear in the report. Asserted against the profile's own ladder
+    // rather than a hard-coded list, so it keeps holding as rungs are added.
+    const notes = partial.slice(partial.indexOf('NOT MEASURED'))
+    const measured = new Set(['normal_8', 'normal_16', 'normal_24'])
+    for (const phase of profilePhases('short')) {
+      const [, size, burst] = phase.key.split('_')
+      if (measured.has(`${size}_${burst}`)) {
+        continue
+      }
+      assert.match(notes, new RegExp(`${size} @ burst of ${burst}\\b`))
+    }
+  })
+
+  test('says nothing about a cutoff while the whole ladder fits inside it', () => {
+    // `short`'s cutoff used to truncate the ladder — the last five rungs, all
+    // of `xlarge` among them — and the report named them as expected-absent.
+    // The cutoff now sits above the ladder's length, so that branch is dormant:
+    // nothing is expected-absent, and every gap is a problem. If this starts
+    // failing, a window or a gap has grown until the tail is being silently cut
+    // off again, which is exactly what raising the cutoff was meant to stop.
+    assert.deepEqual(phasesBeyondCutoff('short'), [])
+    assert.doesNotMatch(partial, /past the \d+s cutoff/)
   })
 
   test('a rung that ran but produced nothing is called out as a PROBLEM', () => {
