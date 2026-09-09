@@ -723,6 +723,7 @@ run is meaningless.
 | ~~`PERF_PROFILE`~~               | —                                              | **Ignored.** Use `PROFILE` — it is the only knob for what runs. |
 | `PERF_DUMP_SCHEDULE`             | unset                                          | `true` prints the resolved schedule and exits, touching nothing. |
 | `WINDOW_<step>`                  | _derived_                                      | Override one step's window, e.g. `WINDOW_journey_normal_10=30`. The timeline re-derives around it. |
+| `USERS_<step>`                   | _derived_                                      | How many virtual users hit one step at once — the rung of the ladder, e.g. `USERS_journey_normal_10=4`. Changes the load, not the work per user (that is the window). **To skip a step, zero this AND its window**: a window of 0 with users still set makes JMeter refuse the thread group rather than skip it, logging an error per skipped step. |
 | `PHASE_GAP_SECONDS`              | _derived per phase_                            | Set it and every phase gets that uniform gap instead of its own drain time. |
 | `MIX_THREADS`                    | `8`                                            | Threads on the mixed workload.                                  |
 | `MIX_{LIST,FETCH,EDIT,VALIDATE}_PERCENT` | `40/25/25/10`                          | The mix, as percent of iterations. Warns if they do not total 100. |

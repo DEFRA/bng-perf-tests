@@ -410,6 +410,21 @@ for phase_key in ${PROFILE_PHASE_LIST}; do
   # re-derives around it — set durations, not delays, as everywhere else here.
   eval "phase_window=\${WINDOW_${phase_key}:-\${phase_window}}"
 
+  # phase_users is how many virtual users hit this step at once — it becomes the
+  # thread group's num_threads. It is the rung of the ladder: the same operation
+  # is repeated at 1, 2, 5, 10, 20 users so the run shows where it starts to
+  # degrade. Changing it changes the load, not the amount of work each user does
+  # (that is the window and the loop counts).
+  #
+  # The override exists so a caller can retune or drop a rung without editing
+  # the profile. To DROP one, zero this AND its window: zeroing the window alone
+  # does not skip it, because JMeter refuses to start a thread group of N users
+  # for 0 seconds ("Invalid duration 0 set in Thread Group"). The step stays off
+  # either way, but each one then logs an error that is not a failure — and a
+  # thread group that failed for a real reason is lost among them. Zero both and
+  # the step is as quiet as one the profile never listed.
+  eval "phase_users=\${USERS_${phase_key}:-\${phase_users}}"
+
   eval "PHASE_USERS_${phase_key}=${phase_users}"
   eval "PHASE_WINDOW_${phase_key}=${phase_window}"
 done
