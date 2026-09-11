@@ -1035,8 +1035,23 @@ repos names it. `dev` resolves to **Defra ID (Azure AD B2C)** at
 `dcidmtest.b2clogin.com`, the same journey `bng-metric-journey-tests`'
 `defra-id-login.page.js` covers.
 
-`--auth` defaults to `auto`, which waits to see which sign-in page renders and
-drives that one; `--auth one-login` / `--auth government-gateway` force it.
+Defra ID fronts more than one identity provider, so `/auth/login` lands on a
+chooser — a page of radios — rather than on a sign-in form. Which one you want
+is a preference this code cannot infer, so say it:
+
+```sh
+--auth one-login           # pick GOV.UK One Login on the chooser
+--auth government-gateway  # pick Government Gateway
+--auth auto                # default
+```
+
+`auto` prefers Government Gateway when both are offered, because that is the
+path the journey suite drives and so the one with known-good selectors. It says
+so when it chooses, rather than picking silently.
+
+The provider names are matched loosely ("One Login", "Government Gateway")
+rather than as exact strings: the wording belongs to Defra ID and is in none of
+these repos, so a relabelling should not break the run.
 
 When sign-in fails, the page it actually reached is described — URL, headings,
 buttons, inputs and their labels — and screenshotted to `reports/`. That is the

@@ -428,11 +428,76 @@ export function tile(count, screen, requestedCols) {
  * Selectors mirror test/pages/defra-id-login.page.js. If the hosted pages
  * change, that page object is the thing to re-verify against a headed run.
  */
+/**
+ * Pick an identity provider on the Defra ID chooser, if that is where we are.
+ *
+ * Defra ID (Azure AD B2C) fronts more than one IdP, so `/auth/login` lands on a
+ * page of radios rather than on a sign-in form. Which one you want is a
+ * preference this code cannot infer — both are legitimate — so `--auth` is how
+ * you say, and `auto` keeps the behaviour the journey suite has always had.
+ *
+ * Names are matched loosely on purpose. The exact wording is Defra ID's to
+ * change and is not in any repo here; "One Login" and "Government Gateway" are
+ * the parts that carry the meaning, and matching those survives a relabelling
+ * that an exact string would not.
+ *
+ * @returns {string|null} the provider chosen, or null if this is not a chooser
+ */
+export async function chooseIdentityProvider(page, provider) {
+  const options = {
+    'government-gateway': {
+      radio: page.getByRole('radio', { name: /government gateway/i }),
+      label: 'Government Gateway'
+    },
+    'one-login': {
+      radio: page.getByRole('radio', { name: /one.?login/i }),
+      label: 'GOV.UK One Login'
+    }
+  }
+
+  const visible = {}
+  for (const [key, option] of Object.entries(options)) {
+    visible[key] = await option.radio.isVisible().catch(() => false)
+  }
+  if (!visible['government-gateway'] && !visible['one-login']) {
+    return null
+  }
+
+  // `auto` prefers Government Gateway when both are offered — it is what the
+  // journey suite drives, so it is the path with known-good selectors. Said out
+  // loud rather than silently, because the other option is right there.
+  let wanted = provider
+  if (provider === 'auto') {
+    wanted = visible['government-gateway'] ? 'government-gateway' : 'one-login'
+    if (visible['government-gateway'] && visible['one-login']) {
+      info(
+        color(
+          'grey',
+          '  both providers offered; choosing Government Gateway ' +
+            '(--auth one-login for the other)'
+        )
+      )
+    }
+  }
+
+  if (!visible[wanted]) {
+    const offered = Object.entries(visible)
+      .filter(([, isVisible]) => isVisible)
+      .map(([key]) => key)
+      .join(', ')
+    throw new Error(
+      `the sign-in page does not offer ${options[wanted].label}. It offers: ${offered}`
+    )
+  }
+
+  await options[wanted].radio.check()
+  info(color('grey', `  signing in with ${options[wanted].label}`))
+  await page.getByRole('button', { name: /Continue|Next/ }).click()
+  return wanted
+}
+
+/** The Government Gateway user-ID and password pages, after the chooser. */
 export async function signInGovernmentGateway(page, username, password) {
-  await page
-    .getByRole('radio', { name: 'Sign in with Government Gateway' })
-    .check()
-  await page.getByRole('button', { name: 'Continue' }).click()
   await page.getByLabel('Government Gateway user ID').fill(username)
   // exact: true — the GOV.UK password field has a "Show password" toggle whose
   // accessible name also contains "password".
@@ -440,6 +505,7 @@ export async function signInGovernmentGateway(page, username, password) {
   await page.getByRole('button', { name: 'Sign in' }).click()
 }
 
+/** The GOV.UK One Login email and password pages. */
 export async function signInOneLogin(page, email, password) {
   // One Login sometimes shows a "sign in or create an account" step first. It
   // is not always there — depends on the service's configuration — so click it
@@ -463,46 +529,49 @@ export async function signInOneLogin(page, email, password) {
 /**
  * Sign in, and say something useful when it cannot.
  *
- * Provider detection rather than assumption: these repos carry no One Login
- * reference at all — the journey suite drives Defra ID (Azure AD B2C ->
- * Government Gateway) — but the frontend only ever sees a generic
- * `OIDC_DISCOVERY_URL` set per environment in the CDP Portal, so which provider
- * answers is a deployment fact this code cannot read. Waiting to see which
- * controls render costs one race and removes the guess. `--auth` forces it when
- * detection gets it wrong.
+ * Two shapes to handle. `/auth/login` may land on the Defra ID chooser — a page
+ * of identity providers — or straight on a provider's own first form, depending
+ * on how the environment's OIDC_DISCOVERY_URL is configured. So: wait to see
+ * which, pick a provider if asked to, then drive that provider's pages.
  *
  * MFA is the case worth naming explicitly. One Login enforces a second factor
- * as a matter of course, and no amount of selector work automates a code sent
- * to someone's phone. Rather than time out with "could not find the password
- * field", this detects the prompt and points at --manual-login, which sidesteps
- * the whole question by letting a human do the sign-in once.
+ * as a matter of course and no amount of selector work automates a code sent to
+ * someone's phone, so this detects the prompt and points at --manual-login
+ * rather than timing out on a field that will never appear.
  */
 export async function signIn(page, baseUrl, username, password, provider) {
   await page.goto(`${baseUrl}/auth/login`, { waitUntil: 'domcontentloaded' })
 
-  const governmentGateway = page.getByRole('radio', {
-    name: 'Sign in with Government Gateway'
-  })
-  // Label-first per the journey suite's conventions. One Login's first screen
-  // asks for an email address; Government Gateway's asks you to pick a provider.
-  const oneLoginEmail = page.getByLabel(/email address/i)
+  // Anything recognisable: either chooser radio, or a provider's first field.
+  await Promise.race([
+    page
+      .getByRole('radio', { name: /government gateway|one.?login/i })
+      .first()
+      .waitFor({ timeout: LOGIN_TIMEOUT }),
+    page.getByLabel(/email address/i).waitFor({ timeout: LOGIN_TIMEOUT }),
+    page
+      .getByLabel('Government Gateway user ID')
+      .waitFor({ timeout: LOGIN_TIMEOUT })
+  ])
 
-  let useGovernmentGateway
-  if (provider === 'government-gateway') {
-    useGovernmentGateway = true
-  } else if (provider === 'one-login') {
-    useGovernmentGateway = false
-  } else {
-    await Promise.race([
-      governmentGateway.waitFor({ timeout: LOGIN_TIMEOUT }),
-      oneLoginEmail.waitFor({ timeout: LOGIN_TIMEOUT })
-    ])
-    useGovernmentGateway = await governmentGateway
-      .isVisible()
-      .catch(() => false)
+  const chosen = await chooseIdentityProvider(page, provider)
+
+  // No chooser: we are already on a provider's own pages. Believe --auth if it
+  // was given, otherwise tell them apart by which field is present.
+  let driving = chosen
+  if (!driving) {
+    if (provider !== 'auto') {
+      driving = provider
+    } else {
+      const isGovernmentGateway = await page
+        .getByLabel('Government Gateway user ID')
+        .isVisible()
+        .catch(() => false)
+      driving = isGovernmentGateway ? 'government-gateway' : 'one-login'
+    }
   }
 
-  if (useGovernmentGateway) {
+  if (driving === 'government-gateway') {
     await signInGovernmentGateway(page, username, password)
   } else {
     await signInOneLogin(page, username, password)
