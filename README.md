@@ -998,6 +998,10 @@ BNG_PASSWORD=... npm run uploads:burst -- \
 From the harness: `npm run uploads:burst -- --url ... --user ...`.
 `--help` lists every option.
 
+The windows stay up for **10 seconds** after the run so you can read the last
+page each one reached — `--linger <seconds>` to change it, `--linger 0` to close
+at once, or `--keep-open` to wait for Enter instead.
+
 `--size` takes a label from `fixtures/manifest.json` — `normal` (80 parcels),
 `busy` (800), `large` (5,000, the default) or `xlarge` (12,000) — so a window
 uploads exactly the file a JMeter phase would. `--file` takes a path instead.

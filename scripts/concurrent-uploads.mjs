@@ -75,8 +75,21 @@ const MANUAL_LOGIN_TIMEOUT = 300_000
 /** Enough of a page to recognise it by, without pasting the whole DOM. */
 const MAX_REPORTED_CONTROLS = 8
 
+const MS_PER_SECOND = 1000
+
 /** A notification banner's worth of text, not a whole page of it. */
 const MAX_MESSAGE_CHARS = 200
+
+/**
+ * How long the windows stay up after the run, so the last page each one reached
+ * can actually be read.
+ *
+ * The point of this tool is watching, and the most interesting moment is the
+ * one right at the end — which is exactly the moment the windows were being
+ * torn down. A few seconds costs nothing and is the difference between seeing
+ * the result and being told about it.
+ */
+const DEFAULT_LINGER_SECONDS = 10
 const SETUP_TIMEOUT = 60_000
 const OUTCOME_TIMEOUT = 150_000
 
@@ -143,7 +156,10 @@ Options
   --screen <WxH>       Override detected screen size, e.g. --screen 3440x1440.
   --stagger <ms>       Delay between submissions. Default 0 — a true burst.
   --headless           No windows. Useful for a quick pass/fail count.
-  --keep-open          Leave the windows up at the end until you press Enter.
+  --linger <seconds>   Keep the windows up this long after the run, so you can
+                       read the final page. Default ${DEFAULT_LINGER_SECONDS};
+                       0 closes immediately.
+  --keep-open          Leave the windows up until you press Enter instead.
   --timeout <ms>       Per-upload outcome budget. Default ${OUTCOME_TIMEOUT}.
   --help               This text.
 
@@ -170,7 +186,8 @@ const VALUE_OPTIONS = new Set([
   '--cols',
   '--screen',
   '--stagger',
-  '--timeout'
+  '--timeout',
+  '--linger'
 ])
 
 /** Options that are on or off. */
@@ -1089,6 +1106,7 @@ async function resolveOptions(args) {
     headless: Boolean(args.headless),
     keepOpen: Boolean(args['keep-open']),
     staggerMs: Number(args.stagger ?? 0),
+    lingerSeconds: Number(args.linger ?? DEFAULT_LINGER_SECONDS),
     outcomeTimeout: Number(args.timeout ?? OUTCOME_TIMEOUT),
     screen,
     cols: args.cols ? Number(args.cols) : undefined
@@ -1142,6 +1160,36 @@ async function mintSession(opts) {
     throw err
   } finally {
     await browser.close()
+  }
+}
+
+/**
+ * Hold the windows open at the end.
+ *
+ * Nothing to wait for when there is nothing to look at, so headless runs skip
+ * it entirely rather than sleeping for no reason.
+ */
+async function lingerBeforeClosing(opts) {
+  if (opts.headless) {
+    return
+  }
+  if (opts.keepOpen) {
+    info('')
+    await waitForEnter('Windows left open. Press Enter to close them... ')
+    return
+  }
+  if (opts.lingerSeconds > 0) {
+    info('')
+    info(
+      color(
+        'grey',
+        `  closing the windows in ${opts.lingerSeconds}s ` +
+          '(--linger to change, --keep-open to wait for Enter)'
+      )
+    )
+    await new Promise((resolve) =>
+      setTimeout(resolve, opts.lingerSeconds * MS_PER_SECOND)
+    )
   }
 }
 
@@ -1311,10 +1359,7 @@ async function main() {
 
   const broken = summarise(results, path.basename(opts.filePath), ready.length)
 
-  if (opts.keepOpen && !opts.headless) {
-    info('')
-    await waitForEnter('Windows left open. Press Enter to close them... ')
-  }
+  await lingerBeforeClosing(opts)
 
   await closeAll(windows)
   await fs.rm(session.authDir, { recursive: true, force: true })

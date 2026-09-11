@@ -236,3 +236,23 @@ describe('sign-in options', () => {
     assert.equal(parseArgs(['--auth', 'one-login']).auth, 'one-login')
   })
 })
+
+describe('how long the windows stay up', () => {
+  test('--linger takes a value', () => {
+    assert.equal(parseArgs(['--linger', '30']).linger, '30')
+  })
+
+  test('--linger 0 is a legitimate choice, not a missing value', () => {
+    // Number('0') is falsy, so anything reading this with ?? or || instead of
+    // an explicit undefined check would silently restore the default.
+    const args = parseArgs(['--linger', '0'])
+    assert.equal(args.linger, '0')
+    assert.equal(Number(args.linger ?? 10), 0)
+  })
+
+  test('--keep-open remains a flag alongside it', () => {
+    const args = parseArgs(['--keep-open', '--linger', '5'])
+    assert.equal(args['keep-open'], true)
+    assert.equal(args.linger, '5')
+  })
+})
