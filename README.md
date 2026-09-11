@@ -1009,8 +1009,14 @@ uploads exactly the file a JMeter phase would. `--file` takes a path instead.
 Three things it does deliberately:
 
 - **Signs in once, but gives every window its own session.** The credential
-  round trip happens once; each window then re-runs `/auth/login`, which the
-  IdP answers from its own SSO without asking for anything. This matters: the
+  round trip happens once. Each window is then handed the identity provider's
+  cookies **but not the service's**, so it is unauthenticated at the service and
+  its own `/auth/login` mints a session of its own — which SSO answers without
+  asking for anything. Keeping the service's session cookie does not work:
+  `/auth/login` does not short-circuit for an authenticated caller, it writes
+  fresh PKCE state into whatever session the cookie names and the callback
+  writes `auth` into that same one, so every window keeps sharing one session
+  however many times it re-authorises. This matters: the
   upload journey keeps its state under session keys scoped to the upload TYPE,
   not the project (`pendingUploadId`, `uploadStartedAt`), so two concurrent
   uploads sharing a session write to the same slot — the first to finish clears

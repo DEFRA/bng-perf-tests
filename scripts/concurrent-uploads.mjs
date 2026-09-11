@@ -905,6 +905,47 @@ export async function saveWindowEvidence(page, label, entries, result) {
  * IdP cookies came along in the storage state, so its own SSO answers the
  * redirect without asking for anything — no credentials, no second factor.
  */
+/**
+ * Take the SERVICE's own cookies out of a storage state, leaving the identity
+ * provider's.
+ *
+ * This is what makes a per-window session possible. /auth/login does not
+ * short-circuit for an already-authenticated caller: it writes fresh PKCE state
+ * into whatever session the cookie names, and the callback writes `auth` into
+ * that same one (the only yar.reset() in the auth controller is logout). So
+ * handing every window the session cookie from the first sign-in means every
+ * window keeps writing into ONE server-side session, no matter how many times
+ * they re-authorise.
+ *
+ * Without that cookie a window is simply unauthenticated: yar mints a new
+ * session on the first write and issues its own cookie, and the IdP cookies
+ * that are left answer the redirect from SSO without asking for anything. One
+ * credential prompt, N independent sessions.
+ *
+ * @returns {Promise<string>} path to a new state file
+ */
+export async function stripServiceCookies(statePath, baseUrl, outPath) {
+  const state = JSON.parse(await fs.readFile(statePath, 'utf8'))
+  const host = new URL(baseUrl).hostname
+
+  // Drop any cookie the browser would send to the service — by the same
+  // host-suffix rule the browser uses, so a domain-wide cookie goes too.
+  const belongsToService = (domain = '') => {
+    const bare = domain.replace(/^\./, '')
+    return host === bare || host.endsWith(`.${bare}`)
+  }
+
+  const kept = (state.cookies ?? []).filter(
+    (cookie) => !belongsToService(cookie.domain)
+  )
+  const dropped = (state.cookies ?? []).length - kept.length
+  await fs.writeFile(
+    outPath,
+    JSON.stringify({ ...state, cookies: kept, origins: [] })
+  )
+  return { path: outPath, kept: kept.length, dropped }
+}
+
 /** Does the page show an OAuth/OIDC error rather than a sign-in form? */
 async function hasOidcError(page) {
   return page
@@ -1307,6 +1348,26 @@ async function main() {
     return 1
   }
 
+  // Every window starts from the IdP cookies ONLY, so each one signs itself in
+  // and gets a session of its own. Sharing the service's session cookie is what
+  // made two concurrent uploads clobber each other's pendingUploadId.
+  let windowState = session.statePath
+  if (!opts.shareSession) {
+    const stripped = await stripServiceCookies(
+      session.statePath,
+      opts.baseUrl,
+      path.join(session.authDir, 'idp-only.json')
+    )
+    windowState = stripped.path
+    info(
+      color(
+        'grey',
+        `  ${stripped.dropped} service cookie(s) dropped, ` +
+          `${stripped.kept} identity-provider cookie(s) kept`
+      )
+    )
+  }
+
   info('')
   info(`> opening ${opts.count} window(s) and staging the upload in each`)
   const stamp = Date.now()
@@ -1314,7 +1375,7 @@ async function main() {
     layout.cells.map((cell) =>
       openWindow(cell, {
         headless: opts.headless,
-        storageState: session.statePath,
+        storageState: windowState,
         baseUrl: opts.baseUrl
       })
     )
