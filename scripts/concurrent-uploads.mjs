@@ -77,6 +77,19 @@ const MAX_REPORTED_CONTROLS = 8
 
 const MS_PER_SECOND = 1000
 
+/**
+ * Budget for a single Playwright action — finding a control, filling it,
+ * clicking it.
+ *
+ * Playwright's own default is 30 s, which is generous for one window and not
+ * for eight: with that many browsers on one machine, all pushing a large file
+ * at the same service, everything from a form fill to a page render is slower
+ * than it would be alone. This is a budget for the BROWSER being busy, not for
+ * the service being slow — the service's budget is the outcome timeout, which
+ * is separate and much longer.
+ */
+const DEFAULT_ACTION_TIMEOUT = 60_000
+
 /** A notification banner's worth of text, not a whole page of it. */
 const MAX_MESSAGE_CHARS = 200
 
@@ -165,6 +178,9 @@ Options
                        0 closes immediately.
   --keep-open          Leave the windows up until you press Enter instead.
   --timeout <ms>       Per-upload outcome budget. Default ${OUTCOME_TIMEOUT}.
+  --action-timeout <ms> Budget for one browser action. Default
+                       ${DEFAULT_ACTION_TIMEOUT} — raise it if many windows on a
+                       busy machine start timing out on clicks and fills.
   --help               This text.
 
 Examples
@@ -191,7 +207,8 @@ const VALUE_OPTIONS = new Set([
   '--screen',
   '--stagger',
   '--timeout',
-  '--linger'
+  '--linger',
+  '--action-timeout'
 ])
 
 /** Options that are on or off. */
@@ -984,7 +1001,10 @@ export async function establishOwnSession(page, baseUrl) {
 }
 
 /** One window: its own browser process, placed on the screen. */
-export async function openWindow(cell, { headless, storageState, baseUrl }) {
+export async function openWindow(
+  cell,
+  { headless, storageState, baseUrl, actionTimeout = DEFAULT_ACTION_TIMEOUT }
+) {
   const proxyServer = process.env.HTTPS_PROXY || process.env.HTTP_PROXY
   const browser = await chromium.launch({
     headless,
@@ -1011,6 +1031,7 @@ export async function openWindow(cell, { headless, storageState, baseUrl }) {
     baseURL: baseUrl,
     viewport: null
   })
+  context.setDefaultTimeout(actionTimeout)
   return { browser, context, page: await context.newPage() }
 }
 
@@ -1219,6 +1240,7 @@ async function resolveOptions(args) {
     staggerMs: Number(args.stagger ?? 0),
     lingerSeconds: Number(args.linger ?? DEFAULT_LINGER_SECONDS),
     outcomeTimeout: Number(args.timeout ?? OUTCOME_TIMEOUT),
+    actionTimeout: Number(args['action-timeout'] ?? DEFAULT_ACTION_TIMEOUT),
     screen,
     cols: args.cols ? Number(args.cols) : undefined
   }
@@ -1386,7 +1408,8 @@ async function main() {
       openWindow(cell, {
         headless: opts.headless,
         storageState: windowState,
-        baseUrl: opts.baseUrl
+        baseUrl: opts.baseUrl,
+        actionTimeout: opts.actionTimeout
       })
     )
   )
@@ -1472,7 +1495,14 @@ async function main() {
         await new Promise((resolve) => setTimeout(resolve, opts.staggerMs * i))
       }
       try {
-        await s.win.page.getByRole('button', { name: 'Continue' }).click()
+        // noWaitAfter: the click is the moment of submission; what follows is
+        // the service's business and awaitOutcome's to watch. Waiting here for
+        // "scheduled navigations to finish" put a 30 s cap on an upload that
+        // legitimately takes longer — eight large files leaving one machine at
+        // once — and reported a click timeout for a click that had worked.
+        await s.win.page
+          .getByRole('button', { name: 'Continue' })
+          .click({ noWaitAfter: true })
         const result = await awaitOutcome(
           s.win.page,
           s.projectId,

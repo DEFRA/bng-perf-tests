@@ -1050,6 +1050,19 @@ It reports one outcome per window, because they mean different things:
 | `gave up` | The frontend polled for its full two minutes and stopped. |
 | `no answer` | Nothing conclusive within the budget. |
 
+Two separate budgets, which are easy to confuse:
+
+| Budget | Default | Covers |
+| --- | --- | --- |
+| `--action-timeout` | 60s | One browser action — finding a control, filling it, clicking it. A budget for the **browser** being busy. Raise it when many windows on one machine start timing out on clicks and fills. |
+| `--timeout` | 150s | From submission to a conclusive answer. A budget for the **service**. |
+
+The submit click itself does not wait for the navigation it starts: the click is
+the moment of submission, and what follows is the service's business, tracked by
+the outcome budget. Waiting there put a 30s cap on uploads that legitimately
+take longer — eight large files leaving one machine at once — and reported a
+click timeout for a click that had already worked.
+
 **Every window that does not simply succeed leaves evidence in `reports/`**: a
 full-page screenshot, the final URL, the message it was showing, and the log of
 every request it made to the service with status codes (assets excluded). The
