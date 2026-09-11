@@ -1014,10 +1014,30 @@ Three things it does deliberately:
 - **Tiles.** Each window is its own browser process with an explicit position
   and size.
 
-It reports one of four outcomes per window — `validated`, `rejected`, `busy` or
-`gave up` — because they mean different things, and **`busy` is a healthy
-response to a burst** rather than a failure; it does not count toward the
-non-zero exit.
+It reports one outcome per window, because they mean different things:
+
+| Outcome | Means |
+| --- | --- |
+| `validated` | The file was checked and accepted. |
+| `busy` | Never looked at — the service said come back. A **healthy** response to a burst, and does not count as a failure. |
+| `returned` | Back on the upload form with something else to say; the message is captured. |
+| `rejected` | Looked at and refused — a problem with the file. |
+| `gave up` | The frontend polled for its full two minutes and stopped. |
+| `no answer` | Nothing conclusive within the budget. |
+
+**Every window that does not simply succeed leaves evidence in `reports/`**: a
+full-page screenshot, the final URL, the message it was showing, and the log of
+every request it made to the service with status codes (assets excluded). The
+run prints the non-OK responses inline:
+
+```
+  What the service answered:
+  #1  503 POST /projects/abc/upload-baseline-file
+        reports/burst--1.txt
+```
+
+That is the difference between "one of them ended up back on the form" and
+"one of them was refused with a 503 eleven seconds in".
 
 **`--count` is capped at 12, and the cap is a refusal rather than a clamp.**
 Each window is a Chromium process, so past a dozen they contend with each other,

@@ -74,6 +74,9 @@ const MANUAL_LOGIN_TIMEOUT = 300_000
 
 /** Enough of a page to recognise it by, without pasting the whole DOM. */
 const MAX_REPORTED_CONTROLS = 8
+
+/** A notification banner's worth of text, not a whole page of it. */
+const MAX_MESSAGE_CHARS = 200
 const SETUP_TIMEOUT = 60_000
 const OUTCOME_TIMEOUT = 150_000
 
@@ -736,9 +739,9 @@ function settle(promise, label) {
  * Collapsing them into pass/fail would hide the distinction the whole exercise
  * is about.
  */
-export function awaitOutcome(page, projectId, timeoutMs) {
+export async function awaitOutcome(page, projectId, timeoutMs) {
   const options = { timeout: timeoutMs }
-  return Promise.race([
+  const label = await Promise.race([
     settle(
       page.waitForURL(
         new RegExp(`/projects/${projectId}/project-summary`),
@@ -747,15 +750,121 @@ export function awaitOutcome(page, projectId, timeoutMs) {
       'validated'
     ),
     settle(page.waitForURL(/\/error-file/, options), 'rejected'),
-    settle(page.getByText(/service is busy/i).waitFor(options), 'busy'),
+    settle(page.getByText(/service is busy/i).first().waitFor(options), 'busy'),
     settle(
       page
         .getByText(/taking longer than expected|try again later/i)
+        .first()
         .waitFor(options),
       'gave up'
     ),
+    // Back on the upload form with something to say. The upload page renders
+    // every message this way (UploadHabitatFilePage's errorSummary), so this
+    // catches both "busy, come back" and a real complaint about the file —
+    // which is why the text decides which it was rather than the locator.
+    settle(page.getByRole('alert').first().waitFor(options), 'returned'),
     new Promise((resolve) => setTimeout(() => resolve('no answer'), timeoutMs))
   ])
+
+  if (label !== 'returned' && label !== 'busy') {
+    return { outcome: label, detail: null }
+  }
+
+  const text = await page
+    .getByRole('alert')
+    .first()
+    .innerText()
+    .catch(() => '')
+  const message = text.replaceAll(/\s+/g, ' ').trim().slice(0, MAX_MESSAGE_CHARS)
+  if (/busy/i.test(message) || label === 'busy') {
+    return { outcome: 'busy', detail: message || null }
+  }
+  return { outcome: 'returned', detail: message || page.url() }
+}
+
+/**
+ * Note every request this window makes to the service, so a window that ends
+ * somewhere unexpected can say what the service actually answered.
+ *
+ * Static assets are dropped: a page load is a hundred of them and none carry
+ * the answer. What is left is the journey — the upload POST, the status polls,
+ * the validate call — and its status codes, which is the thing worth reading
+ * when a window lands back on the form with no explanation.
+ */
+export function recordNetwork(page, baseUrl) {
+  const entries = []
+  const interesting = (url) =>
+    url.startsWith(baseUrl) &&
+    !/\.(css|js|mjs|png|jpe?g|gif|svg|ico|woff2?|ttf|map)(\?|$)/i.test(url)
+
+  page.on('response', (response) => {
+    const url = response.url()
+    if (!interesting(url)) {
+      return
+    }
+    entries.push({
+      status: response.status(),
+      method: response.request().method(),
+      path: url.slice(baseUrl.length) || '/'
+    })
+  })
+  page.on('requestfailed', (request) => {
+    const url = request.url()
+    if (!interesting(url)) {
+      return
+    }
+    entries.push({
+      status: 'FAILED',
+      method: request.method(),
+      path: url.slice(baseUrl.length) || '/',
+      error: request.failure()?.errorText
+    })
+  })
+  return entries
+}
+
+/**
+ * Write down what happened to one window that did not simply succeed.
+ *
+ * A result table says `returned`; it cannot say the upload was refused with a
+ * 503 eleven seconds in. The screenshot, the final URL and the request log are
+ * what turn "something went wrong" into a diagnosis, and they exist only while
+ * the browser is still open — so this runs before anything is closed.
+ */
+export async function saveWindowEvidence(page, label, entries, result) {
+  const slug = label.replaceAll(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '')
+  await fs.mkdir(REPORT_DIR, { recursive: true })
+  const screenshot = path.join(REPORT_DIR, `burst-${slug}.png`)
+  await page.screenshot({ path: screenshot, fullPage: true }).catch(() => {})
+
+  const failures = entries.filter(
+    (entry) => entry.status === 'FAILED' || Number(entry.status) >= 400
+  )
+  const lines = [
+    `window   ${label}`,
+    `outcome  ${result.outcome}`,
+    result.detail ? `message  ${result.detail}` : null,
+    `url      ${page.url()}`,
+    '',
+    failures.length > 0
+      ? `non-OK responses (${failures.length}):`
+      : 'no non-OK responses',
+    ...failures.map(
+      (entry) =>
+        `  ${String(entry.status).padStart(6)} ${entry.method.padEnd(4)} ${entry.path}` +
+        (entry.error ? ` (${entry.error})` : '')
+    ),
+    '',
+    `all requests (${entries.length}, assets excluded):`,
+    ...entries.map(
+      (entry) =>
+        `  ${String(entry.status).padStart(6)} ${entry.method.padEnd(4)} ${entry.path}`
+    )
+  ].filter((line) => line !== null)
+
+  const report = path.join(REPORT_DIR, `burst-${slug}.txt`)
+  await fs.writeFile(report, `${lines.join('\n')}\n`)
+  return { screenshot, report, failures }
 }
 
 /** One window: its own browser process, placed on the screen. */
@@ -793,6 +902,7 @@ const OUTCOME_TONES = {
   validated: 'green',
   rejected: 'red',
   busy: 'yellow',
+  returned: 'yellow',
   'gave up': 'yellow',
   'no answer': 'red',
   error: 'red'
@@ -814,6 +924,23 @@ export function summarise(results, fileLabel, count) {
     )
   }
 
+  const withEvidence = results.filter((r) => r.evidence)
+  if (withEvidence.length > 0) {
+    info('')
+    info(color('yellow', '  What the service answered:'))
+    for (const r of withEvidence) {
+      const failures = r.evidence.failures ?? []
+      const summary =
+        failures.length > 0
+          ? failures
+              .map((entry) => `${entry.status} ${entry.method} ${entry.path}`)
+              .join(', ')
+          : 'no non-OK responses'
+      info(`  ${r.label}  ${color('grey', summary)}`)
+      info(color('grey', `        ${r.evidence.report}`))
+    }
+  }
+
   const tally = results.reduce((acc, r) => {
     acc[r.outcome] = (acc[r.outcome] ?? 0) + 1
     return acc
@@ -830,7 +957,10 @@ export function summarise(results, fileLabel, count) {
   // "come back" and a real browser would have retried. Only the rest mean
   // something went wrong that a user could not recover from.
   const broken =
-    (tally.rejected ?? 0) + (tally['no answer'] ?? 0) + (tally.error ?? 0)
+    (tally.rejected ?? 0) +
+    (tally.returned ?? 0) +
+    (tally['no answer'] ?? 0) +
+    (tally.error ?? 0)
   if (broken > 0) {
     info('')
     warn(`${broken} upload(s) did not complete - see the windows for detail`)
@@ -1085,6 +1215,9 @@ async function main() {
   const staged = await Promise.all(
     windows.map(async (win, i) => {
       const label = `#${i + 1}`
+      // Recording starts before the journey does, so the project creation and
+      // the upload are both in the log when something goes wrong later.
+      const network = recordNetwork(win.page, opts.baseUrl)
       try {
         const projectId = await stageUpload(
           win.page,
@@ -1093,10 +1226,10 @@ async function main() {
           `Burst ${stamp} ${label}`
         )
         info(color('grey', `  ${label} ready - project ${projectId}`))
-        return { label, projectId, win, ready: true }
+        return { label, projectId, win, network, ready: true }
       } catch (err) {
         fail(`  ${label} could not be staged: ${err.message}`)
-        return { label, win, ready: false, detail: err.message }
+        return { label, win, network, ready: false, detail: err.message }
       }
     })
   )
@@ -1129,17 +1262,29 @@ async function main() {
       }
       try {
         await s.win.page.getByRole('button', { name: 'Continue' }).click()
-        const outcome = await awaitOutcome(
+        const result = await awaitOutcome(
           s.win.page,
           s.projectId,
           opts.outcomeTimeout
         )
-        return {
+        const row = {
           label: s.label,
           projectId: s.projectId,
-          outcome,
+          outcome: result.outcome,
+          detail: result.detail,
           elapsedMs: Date.now() - firedAt
         }
+        // Evidence for anything that did not simply work, gathered while the
+        // browser is still open — afterwards there is nothing left to ask.
+        if (result.outcome !== 'validated') {
+          row.evidence = await saveWindowEvidence(
+            s.win.page,
+            s.label,
+            s.network,
+            result
+          ).catch(() => null)
+        }
+        return row
       } catch (err) {
         return {
           label: s.label,
