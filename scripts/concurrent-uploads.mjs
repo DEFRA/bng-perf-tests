@@ -505,24 +505,61 @@ export async function signInGovernmentGateway(page, username, password) {
   await page.getByRole('button', { name: 'Sign in' }).click()
 }
 
-/** The GOV.UK One Login email and password pages. */
+/**
+ * Get the cookie banner out of the way.
+ *
+ * GOV.UK renders it hidden and reveals it with JavaScript, so it can appear
+ * after the page is otherwise ready and sit over the top of the controls we are
+ * about to click. Rejecting is the conservative choice — it is analytics only,
+ * and this is a robot.
+ */
+async function dismissCookieBanner(page) {
+  const reject = page.getByRole('button', {
+    name: /Reject analytics cookies/i
+  })
+  if (await reject.isVisible().catch(() => false)) {
+    await reject.click().catch(() => {})
+  }
+}
+
+/**
+ * The GOV.UK One Login sign-in pages.
+ *
+ * Every step waits for the control it is about to use. This is reached through
+ * a redirect chain out of Defra ID, so at the moment this function is called
+ * the browser is usually still navigating and NOTHING is on screen yet — an
+ * immediate isVisible() check answers false for a button that appears a moment
+ * later, which is how the first version silently skipped the "Create your
+ * GOV.UK One Login or sign in" interstitial and then timed out looking for an
+ * email field that was one click away.
+ */
 export async function signInOneLogin(page, email, password) {
-  // One Login sometimes shows a "sign in or create an account" step first. It
-  // is not always there — depends on the service's configuration — so click it
-  // only if it is, rather than waiting for something that may never come.
-  const signInFirst = page.getByRole('button', { name: /^Sign in$/ })
-  if (await signInFirst.isVisible().catch(() => false)) {
-    await signInFirst.click()
+  const signInButton = page.getByRole('button', { name: /^Sign in$/ })
+  const emailField = page.getByLabel(/email address/i)
+
+  // Either the interstitial or the email form — which one depends on the
+  // service's configuration, so wait for whichever arrives.
+  await Promise.race([
+    signInButton.waitFor({ timeout: LOGIN_TIMEOUT }),
+    emailField.waitFor({ timeout: LOGIN_TIMEOUT })
+  ])
+  await dismissCookieBanner(page)
+
+  if (await signInButton.isVisible().catch(() => false)) {
+    await signInButton.click()
   }
 
-  await page.getByLabel(/email address/i).fill(email)
+  await emailField.waitFor({ timeout: LOGIN_TIMEOUT })
+  await emailField.fill(email)
   await page.getByRole('button', { name: /Continue|Sign in/ }).click()
 
   // NOT getByLabel(/password/i): One Login renders a "Show password" toggle
   // whose label also contains the word, so a loose match resolves to two
   // elements and Playwright refuses to act on either. The input type is the
   // one thing that identifies this field unambiguously.
-  await page.locator('input[type="password"]').fill(password)
+  const passwordField = page.locator('input[type="password"]')
+  await passwordField.waitFor({ timeout: LOGIN_TIMEOUT })
+  await passwordField.fill(password)
   await page.getByRole('button', { name: /Continue|Sign in/ }).click()
 }
 
@@ -585,10 +622,18 @@ export async function signIn(page, baseUrl, username, password, provider) {
       waitUntil: 'domcontentloaded'
     })
     .then(() => 'in')
-  const secondFactor = page
-    .getByText(/security code|6.digit code|two.factor|authenticator/i)
-    .waitFor({ timeout: LOGIN_TIMEOUT })
-    .then(() => 'mfa')
+  // By URL, and by the code field itself — NOT by prose. One Login's own
+  // "Create your GOV.UK One Login or sign in" page explains that you will need
+  // "a way to get security codes", and matching page text would call that page
+  // a second-factor prompt before sign-in had even started.
+  const secondFactor = Promise.race([
+    page.waitForURL(/enter-code|authenticator|mfa|2fa/i, {
+      timeout: LOGIN_TIMEOUT
+    }),
+    page
+      .getByLabel(/security code|access code/i)
+      .waitFor({ timeout: LOGIN_TIMEOUT })
+  ]).then(() => 'mfa')
 
   const result = await Promise.race([
     landed,

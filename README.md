@@ -1058,6 +1058,13 @@ buttons, inputs and their labels — and screenshotted to `reports/`. That is th
 thing worth reading: a locator timeout says what this script expected, not what
 it found.
 
+**GOV.UK One Login requires a second factor.** Its own sign-in page says so —
+you need "a way to get security codes ... a UK mobile phone number or an
+authenticator app" — so the scripted `--auth one-login` path can reach the code
+entry page and no further. Use `--manual-login` for One Login. The scripted path
+is still driven as far as it goes, and reports the second factor by name rather
+than timing out.
+
 Two escape hatches, in the order to try them:
 
 - `--show-login` runs the scripted sign-in in a **visible** window, so you can
