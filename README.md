@@ -1017,6 +1017,14 @@ Three things it does deliberately:
   it, and the second is redirected back to the upload form **with no message at
   all**, looking exactly like a failed upload. `--share-session` opts out and is
   only safe with `--count 1`.
+
+  Those per-window sign-ins are deliberately **serialised**. They all authorise
+  against the same IdP session, and an identity provider treats one session
+  opening several authorisations at once as the attack it resembles — One Login
+  answers the second with `invalid_request: interaction session and
+  authentication session mismatch`. It costs a redirect each, since SSO answers
+  without asking anything. Only the uploads themselves have to be simultaneous,
+  and they still are.
 - **Holds a starting line.** Each window is walked to the upload form with the
   file already chosen; only then is every Continue clicked together. Staggered
   submissions do not reproduce a burst, and the backend's admission control,

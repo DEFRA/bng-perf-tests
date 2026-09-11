@@ -905,6 +905,15 @@ export async function saveWindowEvidence(page, label, entries, result) {
  * IdP cookies came along in the storage state, so its own SSO answers the
  * redirect without asking for anything — no credentials, no second factor.
  */
+/** Does the page show an OAuth/OIDC error rather than a sign-in form? */
+async function hasOidcError(page) {
+  return page
+    .getByText(/invalid_request|error_description|something went wrong/i)
+    .first()
+    .isVisible()
+    .catch(() => false)
+}
+
 export async function establishOwnSession(page, baseUrl) {
   await page.goto(`${baseUrl}/auth/login`, {
     waitUntil: 'domcontentloaded',
@@ -916,10 +925,19 @@ export async function establishOwnSession(page, baseUrl) {
       waitUntil: 'domcontentloaded'
     })
   } catch {
+    const where = page.url()
+    if (/error|mismatch/i.test(where) || (await hasOidcError(page))) {
+      throw new Error(
+        `the identity provider refused this authorisation (${where}). ` +
+          'If it says "interaction session and authentication session ' +
+          'mismatch", two windows authorised at once — which this serialises ' +
+          'to avoid, so report it.'
+      )
+    }
     throw new Error(
-      'single sign-on did not carry into a new window ' +
-        `(ended on ${page.url()}). Re-run with --share-session, accepting that ` +
-        'concurrent uploads will then interfere with each other.'
+      `single sign-on did not carry into a new window (ended on ${where}). ` +
+        'Re-run with --share-session, accepting that concurrent uploads will ' +
+        'then interfere with each other.'
     )
   }
 }
@@ -1302,16 +1320,45 @@ async function main() {
     )
   )
 
-  const staged = await Promise.all(
-    windows.map(async (win, i) => {
-      const label = `#${i + 1}`
-      // Recording starts before the journey does, so the project creation and
-      // the upload are both in the log when something goes wrong later.
-      const network = recordNetwork(win.page, opts.baseUrl)
+  // Recording starts before the journey does, so sign-in, project creation and
+  // the upload are all in the log when something goes wrong later.
+  const tracked = windows.map((win, i) => ({
+    win,
+    label: `#${i + 1}`,
+    network: recordNetwork(win.page, opts.baseUrl)
+  }))
+
+  // Sessions ONE AT A TIME. Every window authorises against the same IdP
+  // session — that is the whole point of reusing its cookies — and an identity
+  // provider treats one session starting several authorisations at once as the
+  // attack it looks like: GOV.UK One Login answers the second with
+  // "interaction session and authentication session mismatch". Serialising
+  // costs a redirect each and nothing else, because SSO answers them without
+  // asking anything. Only the UPLOADS have to be simultaneous.
+  const sessionFailures = new Map()
+  if (!opts.shareSession) {
+    for (const item of tracked) {
       try {
-        if (!opts.shareSession) {
-          await establishOwnSession(win.page, opts.baseUrl)
+        await establishOwnSession(item.win.page, opts.baseUrl)
+      } catch (err) {
+        sessionFailures.set(item.label, err.message)
+        fail(`  ${item.label} could not get its own session: ${err.message}`)
+      }
+    }
+  }
+
+  const staged = await Promise.all(
+    tracked.map(async ({ win, label, network }) => {
+      if (sessionFailures.has(label)) {
+        return {
+          label,
+          win,
+          network,
+          ready: false,
+          detail: sessionFailures.get(label)
         }
+      }
+      try {
         const projectId = await stageUpload(
           win.page,
           opts.baseUrl,
