@@ -137,6 +137,10 @@ Password (pick one)
   --manual-login       Skip all of that: sign in yourself in a visible window,
                        once, and the session is reused by every upload window.
                        The answer to MFA, which cannot be automated.
+  --share-session      Let every window share the one sign-in. Faster, but the
+                       upload journey keeps per-USER session state, so
+                       concurrent uploads then clobber each other. Only safe
+                       with --count 1.
   --show-login         Drive the scripted sign-in in a VISIBLE window, so you
                        can watch which provider answers and where it sticks.
                        On failure the page is described and screenshotted
@@ -196,6 +200,7 @@ const FLAG_OPTIONS = new Set([
   '--keep-open',
   '--manual-login',
   '--show-login',
+  '--share-session',
   '--help',
   '-h'
 ])
@@ -884,6 +889,41 @@ export async function saveWindowEvidence(page, label, entries, result) {
   return { screenshot, report, failures }
 }
 
+/**
+ * Give this window its OWN frontend session.
+ *
+ * Sharing one session across every window is wrong for this journey, and
+ * silently so. The upload flow keeps its state under session keys scoped to the
+ * upload TYPE, not to the project — `pendingUploadId`, `uploadStartedAt` — so
+ * two concurrent baseline uploads in one session are writing to the same slot.
+ * The first to finish calls clearUploadSession(); the second's next poll finds
+ * no pendingUploadId and is redirected back to the upload form with no message
+ * at all, because that path sets none. It looks exactly like a failed upload
+ * and is nothing of the sort.
+ *
+ * Re-running /auth/login in a fresh context mints a new frontend session. The
+ * IdP cookies came along in the storage state, so its own SSO answers the
+ * redirect without asking for anything — no credentials, no second factor.
+ */
+export async function establishOwnSession(page, baseUrl) {
+  await page.goto(`${baseUrl}/auth/login`, {
+    waitUntil: 'domcontentloaded',
+    timeout: SETUP_TIMEOUT
+  })
+  try {
+    await page.waitForURL(/\/manage-projects|\/project-name/, {
+      timeout: LOGIN_TIMEOUT,
+      waitUntil: 'domcontentloaded'
+    })
+  } catch {
+    throw new Error(
+      'single sign-on did not carry into a new window ' +
+        `(ended on ${page.url()}). Re-run with --share-session, accepting that ` +
+        'concurrent uploads will then interfere with each other.'
+    )
+  }
+}
+
 /** One window: its own browser process, placed on the screen. */
 export async function openWindow(cell, { headless, storageState, baseUrl }) {
   const proxyServer = process.env.HTTPS_PROXY || process.env.HTTP_PROXY
@@ -1058,6 +1098,7 @@ async function resolveOptions(args) {
 
   const manualLogin = Boolean(args['manual-login'])
   const showLogin = Boolean(args['show-login'])
+  const shareSession = Boolean(args['share-session'])
   // DEFRA_ID_USERNAME/PASSWORD is what the journey suite already calls this
   // credential, so an operator who has it exported for an e2e run needs no
   // flags here.
@@ -1101,6 +1142,7 @@ async function resolveOptions(args) {
     auth,
     manualLogin,
     showLogin,
+    shareSession,
     count,
     filePath,
     headless: Boolean(args.headless),
@@ -1267,6 +1309,9 @@ async function main() {
       // the upload are both in the log when something goes wrong later.
       const network = recordNetwork(win.page, opts.baseUrl)
       try {
+        if (!opts.shareSession) {
+          await establishOwnSession(win.page, opts.baseUrl)
+        }
         const projectId = await stageUpload(
           win.page,
           opts.baseUrl,

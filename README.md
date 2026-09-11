@@ -1008,8 +1008,15 @@ uploads exactly the file a JMeter phase would. `--file` takes a path instead.
 
 Three things it does deliberately:
 
-- **Signs in once.** The Defra ID round trip takes seconds and N real logins
-  risk account lockout, so one login mints a storage state every window reuses.
+- **Signs in once, but gives every window its own session.** The credential
+  round trip happens once; each window then re-runs `/auth/login`, which the
+  IdP answers from its own SSO without asking for anything. This matters: the
+  upload journey keeps its state under session keys scoped to the upload TYPE,
+  not the project (`pendingUploadId`, `uploadStartedAt`), so two concurrent
+  uploads sharing a session write to the same slot — the first to finish clears
+  it, and the second is redirected back to the upload form **with no message at
+  all**, looking exactly like a failed upload. `--share-session` opts out and is
+  only safe with `--count 1`.
 - **Holds a starting line.** Each window is walked to the upload form with the
   file already chosen; only then is every Continue clicked together. Staggered
   submissions do not reproduce a burst, and the backend's admission control,
