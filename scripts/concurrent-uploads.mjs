@@ -71,6 +71,9 @@ const LOGIN_TIMEOUT = 90_000
 
 /** A human signing in by hand, MFA and all, is not in a hurry. */
 const MANUAL_LOGIN_TIMEOUT = 300_000
+
+/** Enough of a page to recognise it by, without pasting the whole DOM. */
+const MAX_REPORTED_CONTROLS = 8
 const SETUP_TIMEOUT = 60_000
 const OUTCOME_TIMEOUT = 150_000
 
@@ -82,6 +85,9 @@ const MIN_USABLE_WIDTH = 480
 const MIN_USABLE_HEIGHT = 360
 
 const DEFAULT_SCREEN = { width: 1920, height: 1080 }
+
+/** Gitignored in this repo, so a failure screenshot cannot be committed. */
+const REPORT_DIR = path.join(REPO_ROOT, 'reports')
 
 const ansi = {
   reset: '[0m',
@@ -115,6 +121,10 @@ Password (pick one)
   --manual-login       Skip all of that: sign in yourself in a visible window,
                        once, and the session is reused by every upload window.
                        The answer to MFA, which cannot be automated.
+  --show-login         Drive the scripted sign-in in a VISIBLE window, so you
+                       can watch which provider answers and where it sticks.
+                       On failure the page is described and screenshotted
+                       either way.
 
 Options
   --count <n>          Windows / concurrent uploads. Default ${DEFAULT_COUNT},
@@ -150,6 +160,7 @@ export function parseArgs(argv) {
     '--headless',
     '--keep-open',
     '--manual-login',
+    '--show-login',
     '--help',
     '-h'
   ])
@@ -178,18 +189,131 @@ export function parseArgs(argv) {
  * line, so it does not end up in shell history or in `ps` output.
  */
 function promptForPassword() {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-  })
-  return new Promise((resolve) => {
-    // No masking: Node's readline cannot hide input without taking over the
-    // TTY, and a half-working mask is worse than an honest prompt.
-    rl.question('Password (will be visible): ', (answer) => {
-      rl.close()
-      resolve(answer)
+  const { stdin, stdout } = process
+
+  // Without a TTY there is no keypress stream to intercept — a piped or CI
+  // stdin has to be read the ordinary way, and masking it is meaningless.
+  if (!stdin.isTTY) {
+    const rl = readline.createInterface({ input: stdin, output: stdout })
+    return new Promise((resolve) => {
+      rl.question('Password: ', (answer) => {
+        rl.close()
+        resolve(answer)
+      })
     })
+  }
+
+  // Raw mode so each keypress arrives here instead of being echoed by the
+  // terminal, which is the only way to print a star in its place.
+  return new Promise((resolve) => {
+    stdout.write('Password: ')
+    stdin.setRawMode(true)
+    stdin.resume()
+    stdin.setEncoding('utf8')
+
+    let value = ''
+    const finish = () => {
+      stdin.setRawMode(false)
+      stdin.pause()
+      stdin.off('data', onData)
+      stdout.write('\n')
+    }
+
+    function onData(chunk) {
+      // A chunk, not a character: a paste arrives whole, and so do the escape
+      // sequences an arrow key sends.
+      for (const char of chunk) {
+        if (char === '\r' || char === '\n' || char === '\u0004') {
+          finish()
+          resolve(value)
+          return
+        }
+        if (char === '\u0003') {
+          finish()
+          process.exit(130)
+        }
+        if (char === '\u007f' || char === '\b') {
+          if (value.length > 0) {
+            value = value.slice(0, -1)
+            stdout.write('\b \b')
+          }
+          continue
+        }
+        // Drop anything else non-printable rather than starring it, so an
+        // arrow key does not silently add three characters to the password.
+        if (char >= ' ') {
+          value += char
+          stdout.write('*')
+        }
+      }
+    }
+
+    stdin.on('data', onData)
   })
+}
+
+/**
+ * Say what the sign-in page actually was, when driving it did not work.
+ *
+ * A timeout naming the locator that failed says what this script expected, not
+ * what it found — and what it found is the whole question when the provider is
+ * a deployment detail set outside these repos. So: the URL it ended on, the
+ * headings, and every control it can see, plus a screenshot. That is usually
+ * enough to tell which provider answered and which selector to reach for,
+ * without anyone having to reproduce it by hand.
+ */
+export async function describeSignInPage(page, reportDir) {
+  const lines = []
+  const safely = async (what, fn) => {
+    try {
+      return await fn()
+    } catch {
+      lines.push(`  (could not read ${what})`)
+      return []
+    }
+  }
+
+  lines.push(`  url: ${page.url()}`)
+
+  const headings = await safely('headings', () =>
+    page.locator('h1, h2').allInnerTexts()
+  )
+  for (const heading of headings.slice(0, MAX_REPORTED_CONTROLS)) {
+    lines.push(`  heading: ${heading.trim().replaceAll('\n', ' ')}`)
+  }
+
+  const buttons = await safely('buttons', () =>
+    page.getByRole('button').allInnerTexts()
+  )
+  for (const button of buttons.slice(0, MAX_REPORTED_CONTROLS)) {
+    const text = button.trim()
+    if (text) {
+      lines.push(`  button: ${text}`)
+    }
+  }
+
+  const inputs = await safely('inputs', () =>
+    page.locator('input:not([type=hidden])').evaluateAll((nodes) =>
+      nodes.map((node) => {
+        const label = node.labels?.[0]?.innerText ?? ''
+        return `${node.type || 'text'}${label ? ` — "${label.trim()}"` : ''}`
+      })
+    )
+  )
+  for (const input of inputs.slice(0, MAX_REPORTED_CONTROLS)) {
+    lines.push(`  input: ${input}`)
+  }
+
+  try {
+    await fs.mkdir(reportDir, { recursive: true })
+    const shot = path.join(reportDir, 'signin-failure.png')
+    await page.screenshot({ path: shot, fullPage: true })
+    lines.push(`  screenshot: ${shot}`)
+  } catch {
+    lines.push('  (could not save a screenshot)')
+  }
+
+  return lines.join('\n')
 }
 
 /**
@@ -636,6 +760,7 @@ async function resolveOptions(args) {
   }
 
   const manualLogin = Boolean(args['manual-login'])
+  const showLogin = Boolean(args['show-login'])
   // DEFRA_ID_USERNAME/PASSWORD is what the journey suite already calls this
   // credential, so an operator who has it exported for an e2e run needs no
   // flags here.
@@ -678,6 +803,7 @@ async function resolveOptions(args) {
     password,
     auth,
     manualLogin,
+    showLogin,
     count,
     filePath,
     headless: Boolean(args.headless),
@@ -711,28 +837,29 @@ function describeRun(opts, layout) {
 async function mintSession(opts) {
   const authDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bng-burst-'))
   const statePath = path.join(authDir, 'state.json')
-  // Headed for a manual sign-in, for the obvious reason.
+  // Headed for a manual sign-in, for the obvious reason — and for --show-login,
+  // where watching the scripted attempt IS the point.
   const browser = await chromium.launch({
-    headless: !opts.manualLogin,
+    headless: !(opts.manualLogin || opts.showLogin),
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   })
+  const context = await browser.newContext({ baseURL: opts.baseUrl })
+  const page = await context.newPage()
   try {
-    const context = await browser.newContext({ baseURL: opts.baseUrl })
-    const page = await context.newPage()
     if (opts.manualLogin) {
       await manualSignIn(page, opts.baseUrl)
     } else {
-      await signIn(
-        page,
-        opts.baseUrl,
-        opts.username,
-        opts.password,
-        opts.auth
-      )
+      await signIn(page, opts.baseUrl, opts.username, opts.password, opts.auth)
     }
     await context.storageState({ path: statePath })
-    await context.close()
     return { authDir, statePath }
+  } catch (err) {
+    // Describe the page BEFORE the browser goes away — this is the one moment
+    // the evidence exists.
+    err.pageReport = await describeSignInPage(page, REPORT_DIR).catch(
+      () => null
+    )
+    throw err
   } finally {
     await browser.close()
   }
@@ -774,12 +901,19 @@ async function main() {
     info(color('green', '  signed in'))
   } catch (err) {
     fail(`Sign-in failed: ${err.message}`)
+    if (err.pageReport) {
+      info('')
+      info(color('yellow', '  What the sign-in page actually was:'))
+      info(color('grey', err.pageReport))
+    }
+    info('')
     info(
       color(
         'grey',
-        '  --manual-login lets you sign in by hand once, which works whatever\n' +
-          '  the provider asks for. --auth forces a provider if detection\n' +
-          '  picked the wrong one.'
+        '  --show-login runs the scripted sign-in in a visible window.\n' +
+          '  --manual-login lets you sign in by hand once, which works whatever\n' +
+          '  the provider asks for.\n' +
+          '  --auth forces a provider if detection picked the wrong one.'
       )
     )
     return 1

@@ -1027,10 +1027,33 @@ than the service. That is the point at which the JMeter plan is the right tool.
 Playwright is a `devDependency` and the Dockerfile installs with `--omit=dev`,
 so none of this reaches the perf image — a CDP task never drives a browser.
 
-Sign-in drives Defra ID (Azure AD B2C → Government Gateway), the same journey
-`bng-metric-journey-tests`' `defra-id-login.page.js` covers; if those hosted
-pages change, re-verify against that page object. A GOV.UK One Login screen is
-handled too, but MFA on either provider cannot be automated.
+### Signing in
+
+Which provider answers is a deployment fact — the frontend takes a generic
+`OIDC_DISCOVERY_URL` set per environment in the CDP Portal, and nothing in these
+repos names it. `dev` resolves to **Defra ID (Azure AD B2C)** at
+`dcidmtest.b2clogin.com`, the same journey `bng-metric-journey-tests`'
+`defra-id-login.page.js` covers.
+
+`--auth` defaults to `auto`, which waits to see which sign-in page renders and
+drives that one; `--auth one-login` / `--auth government-gateway` force it.
+
+When sign-in fails, the page it actually reached is described — URL, headings,
+buttons, inputs and their labels — and screenshotted to `reports/`. That is the
+thing worth reading: a locator timeout says what this script expected, not what
+it found.
+
+Two escape hatches, in the order to try them:
+
+- `--show-login` runs the scripted sign-in in a **visible** window, so you can
+  watch which provider answers and where it sticks.
+- `--manual-login` lets you sign in **by hand**, once, in a visible window; the
+  session is then reused by every upload window. It needs no `--user` or
+  password and works whatever the provider asks for — including MFA, which
+  cannot be automated.
+
+The password is never taken on the command line by default: it comes from
+`--password`, `BNG_PASSWORD`, `DEFRA_ID_PASSWORD`, or a masked prompt.
 
 ## Finding the saturation point — the `short` profile
 
