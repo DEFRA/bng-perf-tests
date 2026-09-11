@@ -155,25 +155,61 @@ Examples
     --user 123456789012 --count 9 --size xlarge --screen 3440x1440 --keep-open
 `
 
+/** Options that take a value. Anything else with a `--` is a mistake. */
+const VALUE_OPTIONS = new Set([
+  '--url',
+  '--user',
+  '--password',
+  '--auth',
+  '--count',
+  '--size',
+  '--file',
+  '--cols',
+  '--screen',
+  '--stagger',
+  '--timeout'
+])
+
+/** Options that are on or off. */
+const FLAG_OPTIONS = new Set([
+  '--headless',
+  '--keep-open',
+  '--manual-login',
+  '--show-login',
+  '--help',
+  '-h'
+])
+
+/**
+ * Read the command line, and refuse anything it does not recognise.
+ *
+ * The refusal is the point. This used to treat every unrecognised `--thing` as
+ * value-taking, so running with a flag from a newer version than the one
+ * checked out swallowed the NEXT option as its value and then failed on that
+ * option's value — reporting `Unexpected argument "normal"` for a command whose
+ * actual problem was an unknown `--show-login` three arguments earlier. An
+ * error naming the thing that is wrong is worth more than one naming where the
+ * parser happened to give up.
+ */
 export function parseArgs(argv) {
-  const flags = new Set([
-    '--headless',
-    '--keep-open',
-    '--manual-login',
-    '--show-login',
-    '--help',
-    '-h'
-  ])
   const out = {}
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (!arg.startsWith('--') && arg !== '-h') {
-      throw new Error(`Unexpected argument "${arg}"`)
+    if (!arg.startsWith('-')) {
+      throw new Error(
+        `Unexpected argument "${arg}" — every option starts with --, see --help`
+      )
     }
     const key = arg.replace(/^--?/, '')
-    if (flags.has(arg)) {
+    if (FLAG_OPTIONS.has(arg)) {
       out[key] = true
       continue
+    }
+    if (!VALUE_OPTIONS.has(arg)) {
+      throw new Error(
+        `Unknown option "${arg}". Run --help for the list; if you expected ` +
+          'this one, the checkout may be behind (git pull).'
+      )
     }
     const value = argv[++i]
     if (value === undefined) {

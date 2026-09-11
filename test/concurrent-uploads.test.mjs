@@ -171,6 +171,47 @@ describe('parseArgs', () => {
   test('a stray positional is an error rather than being ignored', () => {
     assert.throws(() => parseArgs(['banana']), /Unexpected argument/)
   })
+
+  test('an unknown option names ITSELF, not the argument after it', () => {
+    // The failure this prevents: an unrecognised option used to be treated as
+    // value-taking, so it swallowed the next option and the error pointed at
+    // that option's value instead — "Unexpected argument \"normal\"" for a
+    // command whose real problem was --show-login three arguments earlier.
+    assert.throws(
+      () => parseArgs(['--show-login-typo', '--size', 'normal']),
+      /Unknown option "--show-login-typo"/
+    )
+  })
+
+  test('a known flag does not swallow the option after it', () => {
+    const args = parseArgs(['--show-login', '--size', 'normal', '--count', '2'])
+    assert.equal(args['show-login'], true)
+    assert.equal(args.size, 'normal')
+    assert.equal(args.count, '2')
+  })
+
+  test('every option named in --help is recognised', () => {
+    const flags = ['--headless', '--keep-open', '--manual-login', '--show-login']
+    for (const flag of flags) {
+      assert.equal(parseArgs([flag])[flag.replace(/^--/, '')], true, flag)
+    }
+    const values = {
+      '--url': 'http://x',
+      '--user': 'a@b.com',
+      '--password': 'pw',
+      '--auth': 'auto',
+      '--count': '2',
+      '--size': 'normal',
+      '--file': '/tmp/x.gpkg',
+      '--cols': '2',
+      '--screen': '800x600',
+      '--stagger': '10',
+      '--timeout': '1000'
+    }
+    for (const [opt, value] of Object.entries(values)) {
+      assert.equal(parseArgs([opt, value])[opt.replace(/^--/, '')], value, opt)
+    }
+  })
 })
 
 describe('sign-in options', () => {
