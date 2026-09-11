@@ -56,6 +56,9 @@ const DEFAULT_COUNT = 4
  */
 export const MAX_WINDOWS = 12
 
+/** Sign-in providers this knows how to drive. `auto` looks at the page. */
+export const AUTH_PROVIDERS = ['auto', 'one-login', 'government-gateway']
+
 /**
  * Budgets, in milliseconds.
  *
@@ -65,6 +68,9 @@ export const MAX_WINDOWS = 12
  * this is the script losing track, not the service being slow.
  */
 const LOGIN_TIMEOUT = 90_000
+
+/** A human signing in by hand, MFA and all, is not in a hurry. */
+const MANUAL_LOGIN_TIMEOUT = 300_000
 const SETUP_TIMEOUT = 60_000
 const OUTCOME_TIMEOUT = 150_000
 
@@ -98,12 +104,17 @@ Fire N concurrent baseline uploads at the BNG Metric service in tiled windows.
 Required
   --url <url>          Frontend base URL, e.g.
                        https://bng-metric-frontend.dev.cdp-int.defra.cloud
-  --user <id>          Sign-in user ID (Government Gateway ID, or One Login
-                       email). Also read from BNG_USERNAME.
+  --user <id>          Who to sign in as: an email address for GOV.UK One
+                       Login, or a 12-digit ID for Government Gateway. Also
+                       read from BNG_USERNAME or DEFRA_ID_USERNAME. Not needed
+                       with --manual-login.
 
 Password (pick one)
   --password <pw>      Read from BNG_PASSWORD if omitted. If neither is set the
                        script prompts, which keeps it out of your shell history.
+  --manual-login       Skip all of that: sign in yourself in a visible window,
+                       once, and the session is reused by every upload window.
+                       The answer to MFA, which cannot be automated.
 
 Options
   --count <n>          Windows / concurrent uploads. Default ${DEFAULT_COUNT},
@@ -113,6 +124,8 @@ Options
                        normal (80 parcels) | busy (800) | large (5,000) |
                        xlarge (12,000). Default ${DEFAULT_SIZE}.
   --file <path>        Upload a GeoPackage of your own instead of --size.
+  --auth <provider>    one-login | government-gateway | auto (default).
+                       auto drives whichever sign-in page actually renders.
   --cols <n>           Tile columns. Default: roughly square.
   --screen <WxH>       Override detected screen size, e.g. --screen 3440x1440.
   --stagger <ms>       Delay between submissions. Default 0 — a true burst.
@@ -133,7 +146,13 @@ Examples
 `
 
 export function parseArgs(argv) {
-  const flags = new Set(['--headless', '--keep-open', '--help', '-h'])
+  const flags = new Set([
+    '--headless',
+    '--keep-open',
+    '--manual-login',
+    '--help',
+    '-h'
+  ])
   const out = {}
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -249,40 +268,132 @@ export function tile(count, screen, requestedCols) {
  * Selectors mirror test/pages/defra-id-login.page.js. If the hosted pages
  * change, that page object is the thing to re-verify against a headed run.
  */
-export async function signIn(page, baseUrl, username, password) {
+export async function signInGovernmentGateway(page, username, password) {
+  await page
+    .getByRole('radio', { name: 'Sign in with Government Gateway' })
+    .check()
+  await page.getByRole('button', { name: 'Continue' }).click()
+  await page.getByLabel('Government Gateway user ID').fill(username)
+  // exact: true — the GOV.UK password field has a "Show password" toggle whose
+  // accessible name also contains "password".
+  await page.getByLabel('Password', { exact: true }).fill(password)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+}
+
+export async function signInOneLogin(page, email, password) {
+  // One Login sometimes shows a "sign in or create an account" step first. It
+  // is not always there — depends on the service's configuration — so click it
+  // only if it is, rather than waiting for something that may never come.
+  const signInFirst = page.getByRole('button', { name: /^Sign in$/ })
+  if (await signInFirst.isVisible().catch(() => false)) {
+    await signInFirst.click()
+  }
+
+  await page.getByLabel(/email address/i).fill(email)
+  await page.getByRole('button', { name: /Continue|Sign in/ }).click()
+
+  // NOT getByLabel(/password/i): One Login renders a "Show password" toggle
+  // whose label also contains the word, so a loose match resolves to two
+  // elements and Playwright refuses to act on either. The input type is the
+  // one thing that identifies this field unambiguously.
+  await page.locator('input[type="password"]').fill(password)
+  await page.getByRole('button', { name: /Continue|Sign in/ }).click()
+}
+
+/**
+ * Sign in, and say something useful when it cannot.
+ *
+ * Provider detection rather than assumption: these repos carry no One Login
+ * reference at all — the journey suite drives Defra ID (Azure AD B2C ->
+ * Government Gateway) — but the frontend only ever sees a generic
+ * `OIDC_DISCOVERY_URL` set per environment in the CDP Portal, so which provider
+ * answers is a deployment fact this code cannot read. Waiting to see which
+ * controls render costs one race and removes the guess. `--auth` forces it when
+ * detection gets it wrong.
+ *
+ * MFA is the case worth naming explicitly. One Login enforces a second factor
+ * as a matter of course, and no amount of selector work automates a code sent
+ * to someone's phone. Rather than time out with "could not find the password
+ * field", this detects the prompt and points at --manual-login, which sidesteps
+ * the whole question by letting a human do the sign-in once.
+ */
+export async function signIn(page, baseUrl, username, password, provider) {
   await page.goto(`${baseUrl}/auth/login`, { waitUntil: 'domcontentloaded' })
 
   const governmentGateway = page.getByRole('radio', {
     name: 'Sign in with Government Gateway'
   })
-  // Label-first per .ai/coding-rules.md. One Login's first screen asks for an
-  // email address; Government Gateway's asks you to pick a provider first.
+  // Label-first per the journey suite's conventions. One Login's first screen
+  // asks for an email address; Government Gateway's asks you to pick a provider.
   const oneLoginEmail = page.getByLabel(/email address/i)
 
-  await Promise.race([
-    governmentGateway.waitFor({ timeout: LOGIN_TIMEOUT }),
-    oneLoginEmail.waitFor({ timeout: LOGIN_TIMEOUT })
-  ])
-
-  if (await governmentGateway.isVisible().catch(() => false)) {
-    await governmentGateway.check()
-    await page.getByRole('button', { name: 'Continue' }).click()
-    await page.getByLabel('Government Gateway user ID').fill(username)
-    // exact: true — the GOV.UK password field has a "Show password" toggle
-    // whose accessible name also contains "password".
-    await page.getByLabel('Password', { exact: true }).fill(password)
-    await page.getByRole('button', { name: 'Sign in' }).click()
+  let useGovernmentGateway
+  if (provider === 'government-gateway') {
+    useGovernmentGateway = true
+  } else if (provider === 'one-login') {
+    useGovernmentGateway = false
   } else {
-    await oneLoginEmail.fill(username)
-    await page.getByRole('button', { name: /Continue|Sign in/ }).click()
-    await page.getByLabel(/password/i).fill(password)
-    await page.getByRole('button', { name: /Continue|Sign in/ }).click()
+    await Promise.race([
+      governmentGateway.waitFor({ timeout: LOGIN_TIMEOUT }),
+      oneLoginEmail.waitFor({ timeout: LOGIN_TIMEOUT })
+    ])
+    useGovernmentGateway = await governmentGateway
+      .isVisible()
+      .catch(() => false)
+  }
+
+  if (useGovernmentGateway) {
+    await signInGovernmentGateway(page, username, password)
+  } else {
+    await signInOneLogin(page, username, password)
   }
 
   // Landing on either page means authenticated: a completer with projects gets
   // the dashboard, one without gets sent straight to create their first.
+  const landed = page
+    .waitForURL(/\/manage-projects|\/project-name/, {
+      timeout: LOGIN_TIMEOUT,
+      waitUntil: 'domcontentloaded'
+    })
+    .then(() => 'in')
+  const secondFactor = page
+    .getByText(/security code|6.digit code|two.factor|authenticator/i)
+    .waitFor({ timeout: LOGIN_TIMEOUT })
+    .then(() => 'mfa')
+
+  const result = await Promise.race([
+    landed,
+    secondFactor.catch(() => new Promise(() => {}))
+  ])
+  if (result === 'mfa') {
+    throw new Error(
+      'the provider is asking for a second factor, which cannot be automated. ' +
+        'Re-run with --manual-login and sign in yourself once.'
+    )
+  }
+}
+
+/**
+ * Let a human sign in, once, in a window they can see.
+ *
+ * The reliable answer to MFA, to a provider whose pages have been redesigned,
+ * and to anything else that makes scripted sign-in brittle. You are sitting in
+ * front of this tool anyway — it exists to be watched — so one manual sign-in
+ * costs almost nothing and removes every assumption this script would otherwise
+ * make about somebody else's login pages.
+ */
+export async function manualSignIn(page, baseUrl) {
+  await page.goto(`${baseUrl}/auth/login`, { waitUntil: 'domcontentloaded' })
+  info('')
+  info(
+    color(
+      'yellow',
+      '  A browser window is open. Sign in there — including any security code.'
+    )
+  )
+  info(color('grey', `  Waiting up to ${MANUAL_LOGIN_TIMEOUT / 60000} minutes.`))
   await page.waitForURL(/\/manage-projects|\/project-name/, {
-    timeout: LOGIN_TIMEOUT,
+    timeout: MANUAL_LOGIN_TIMEOUT,
     waitUntil: 'domcontentloaded'
   })
 }
@@ -520,9 +631,23 @@ async function resolveOptions(args) {
     /\/+$/,
     ''
   )
-  const username = args.user ?? process.env.BNG_USERNAME
-  if (!baseUrl || !username) {
-    throw new Error('--url and --user are required (see --help)')
+  if (!baseUrl) {
+    throw new Error('--url is required (see --help)')
+  }
+
+  const manualLogin = Boolean(args['manual-login'])
+  // DEFRA_ID_USERNAME/PASSWORD is what the journey suite already calls this
+  // credential, so an operator who has it exported for an e2e run needs no
+  // flags here.
+  const username =
+    args.user ?? process.env.BNG_USERNAME ?? process.env.DEFRA_ID_USERNAME
+  if (!username && !manualLogin) {
+    throw new Error('--user is required unless you pass --manual-login')
+  }
+
+  const auth = args.auth ?? 'auto'
+  if (!AUTH_PROVIDERS.includes(auth)) {
+    throw new Error(`--auth must be one of: ${AUTH_PROVIDERS.join(', ')}`)
   }
 
   const count = parseCount(args.count)
@@ -534,16 +659,25 @@ async function resolveOptions(args) {
   // fails immediately rather than after you have typed a password.
   const screen = parseScreen(args.screen) ?? detectScreen()
 
-  const password =
-    args.password ?? process.env.BNG_PASSWORD ?? (await promptForPassword())
-  if (!password) {
-    throw new Error('A password is required')
+  // Nothing is asked for when a human is doing the signing in.
+  let password = null
+  if (!manualLogin) {
+    password =
+      args.password ??
+      process.env.BNG_PASSWORD ??
+      process.env.DEFRA_ID_PASSWORD ??
+      (await promptForPassword())
+    if (!password) {
+      throw new Error('A password is required')
+    }
   }
 
   return {
     baseUrl,
     username,
     password,
+    auth,
+    manualLogin,
     count,
     filePath,
     headless: Boolean(args.headless),
@@ -577,14 +711,25 @@ function describeRun(opts, layout) {
 async function mintSession(opts) {
   const authDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bng-burst-'))
   const statePath = path.join(authDir, 'state.json')
+  // Headed for a manual sign-in, for the obvious reason.
   const browser = await chromium.launch({
-    headless: true,
+    headless: !opts.manualLogin,
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   })
   try {
     const context = await browser.newContext({ baseURL: opts.baseUrl })
     const page = await context.newPage()
-    await signIn(page, opts.baseUrl, opts.username, opts.password)
+    if (opts.manualLogin) {
+      await manualSignIn(page, opts.baseUrl)
+    } else {
+      await signIn(
+        page,
+        opts.baseUrl,
+        opts.username,
+        opts.password,
+        opts.auth
+      )
+    }
     await context.storageState({ path: statePath })
     await context.close()
     return { authDir, statePath }
@@ -618,7 +763,11 @@ async function main() {
   describeRun(opts, layout)
 
   info('')
-  info('> signing in (the slow bit - one login, shared by every window)')
+  info(
+    opts.manualLogin
+      ? '> waiting for you to sign in (once - every window reuses the session)'
+      : '> signing in (the slow bit - one login, shared by every window)'
+  )
   let session
   try {
     session = await mintSession(opts)
@@ -628,8 +777,9 @@ async function main() {
     info(
       color(
         'grey',
-        '  If the service is behind MFA, or the hosted sign-in pages have\n' +
-          '  changed, re-verify test/pages/defra-id-login.page.js headed.'
+        '  --manual-login lets you sign in by hand once, which works whatever\n' +
+          '  the provider asks for. --auth forces a provider if detection\n' +
+          '  picked the wrong one.'
       )
     )
     return 1

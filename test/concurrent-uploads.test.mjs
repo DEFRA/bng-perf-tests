@@ -13,6 +13,7 @@ import { test, describe } from 'node:test'
 import path from 'node:path'
 
 import {
+  AUTH_PROVIDERS,
   MAX_WINDOWS,
   parseArgs,
   parseCount,
@@ -169,5 +170,28 @@ describe('parseArgs', () => {
 
   test('a stray positional is an error rather than being ignored', () => {
     assert.throws(() => parseArgs(['banana']), /Unexpected argument/)
+  })
+})
+
+describe('sign-in options', () => {
+  test('--manual-login is a flag, not a value-taking option', () => {
+    const args = parseArgs(['--manual-login', '--url', 'http://x'])
+    assert.equal(args['manual-login'], true)
+    assert.equal(args.url, 'http://x')
+  })
+
+  test('the providers it knows how to drive', () => {
+    // One Login and Government Gateway are different services with different
+    // first screens; `auto` exists because which one answers is a per-
+    // environment OIDC_DISCOVERY_URL this code cannot read.
+    assert.deepEqual(AUTH_PROVIDERS, [
+      'auto',
+      'one-login',
+      'government-gateway'
+    ])
+  })
+
+  test('--auth takes a value', () => {
+    assert.equal(parseArgs(['--auth', 'one-login']).auth, 'one-login')
   })
 })
