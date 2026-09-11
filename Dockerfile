@@ -25,9 +25,13 @@ RUN apk add --no-cache nodejs
 # This resolves at image-build time on the GitHub Actions runner
 # (DEFRA/cdp-build-action), so a CDP task pulls a finished image and needs no
 # access to GitHub or the npm registry.
+# --omit=dev: the only devDependency is Playwright, which backs the
+# watch-a-burst tool developers run on their own machine (scripts/
+# concurrent-uploads.mjs). A JMeter task never drives a browser, and pulling a
+# browser driver into this image would be a large download for nothing.
 COPY package.json package-lock.json ./
 RUN apk add --no-cache --virtual .build-deps npm git \
-    && npm ci --ignore-scripts --no-audit --no-fund \
+    && npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
     && apk del .build-deps
 
 # scenarios/ carries three things the run needs: the plan itself, the generated

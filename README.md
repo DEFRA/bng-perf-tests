@@ -975,6 +975,63 @@ docker compose up --build
 * On Docker Desktop `host.docker.internal` resolves to the host natively; on Linux
   the compose file adds the `host-gateway` mapping so it resolves there too.
 
+## Watching a burst happen — `scripts/concurrent-uploads.mjs`
+
+JMeter tells you what the numbers were. This tells you what it *looked like*:
+it fires N baseline uploads at a deployed service at the same instant and tiles
+a browser window per upload across your screen, so you can watch which sail
+through, which sit on "Checking your file", and which come back busy.
+
+```bash
+npm install && npx playwright install chromium   # one-time
+
+# Four windows at dev, uploading the 5,000-parcel baseline; prompts for the password
+npm run uploads:burst -- \
+  --url https://bng-metric-frontend.dev.cdp-int.defra.cloud --user <gg-user-id>
+
+# Nine 12,000-parcel uploads at once, on an ultrawide, left up to inspect
+BNG_PASSWORD=... npm run uploads:burst -- \
+  --url https://bng-metric-frontend.dev.cdp-int.defra.cloud \
+  --user <gg-user-id> --count 9 --size xlarge --screen 3440x1440 --keep-open
+```
+
+From the harness: `npm run uploads:burst -- --url ... --user ...`.
+`--help` lists every option.
+
+`--size` takes a label from `fixtures/manifest.json` — `normal` (80 parcels),
+`busy` (800), `large` (5,000, the default) or `xlarge` (12,000) — so a window
+uploads exactly the file a JMeter phase would. `--file` takes a path instead.
+
+Three things it does deliberately:
+
+- **Signs in once.** The Defra ID round trip takes seconds and N real logins
+  risk account lockout, so one login mints a storage state every window reuses.
+- **Holds a starting line.** Each window is walked to the upload form with the
+  file already chosen; only then is every Continue clicked together. Staggered
+  submissions do not reproduce a burst, and the backend's admission control,
+  queue depth and busy responses only engage when requests actually overlap.
+  `--stagger <ms>` if you want the opposite.
+- **Tiles.** Each window is its own browser process with an explicit position
+  and size.
+
+It reports one of four outcomes per window — `validated`, `rejected`, `busy` or
+`gave up` — because they mean different things, and **`busy` is a healthy
+response to a burst** rather than a failure; it does not count toward the
+non-zero exit.
+
+**`--count` is capped at 12, and the cap is a refusal rather than a clamp.**
+Each window is a Chromium process, so past a dozen they contend with each other,
+the windows are too small to read, and the burst measures your laptop rather
+than the service. That is the point at which the JMeter plan is the right tool.
+
+Playwright is a `devDependency` and the Dockerfile installs with `--omit=dev`,
+so none of this reaches the perf image — a CDP task never drives a browser.
+
+Sign-in drives Defra ID (Azure AD B2C → Government Gateway), the same journey
+`bng-metric-journey-tests`' `defra-id-login.page.js` covers; if those hosted
+pages change, re-verify against that page object. A GOV.UK One Login screen is
+handled too, but MFA on either provider cannot be automated.
+
 ## Finding the saturation point — the `short` profile
 
 Every other ladder in this suite is calibrated to sit **below** the knee. Every
