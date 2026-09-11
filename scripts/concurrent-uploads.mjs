@@ -1175,7 +1175,17 @@ async function resolveOptions(args) {
   const count = parseCount(args.count)
 
   const filePath = await resolveUploadFile(args)
-  await fs.access(filePath)
+  try {
+    await fs.access(filePath)
+  } catch {
+    // A raw ENOENT names a path the caller may not recognise — a relative
+    // --file is resolved against the working directory, not this repo.
+    throw new Error(
+      `Cannot read the GeoPackage at ${filePath}. Check the --file path ` +
+        '(quote it if it contains spaces), or use --size for one of the ' +
+        "suite's own fixtures."
+    )
+  }
 
   // Everything cheap is validated before the prompt, so a typo in --screen
   // fails immediately rather than after you have typed a password.
