@@ -975,6 +975,166 @@ docker compose up --build
 * On Docker Desktop `host.docker.internal` resolves to the host natively; on Linux
   the compose file adds the `host-gateway` mapping so it resolves there too.
 
+## Watching a burst happen — `scripts/concurrent-uploads.mjs`
+
+JMeter tells you what the numbers were. This tells you what it *looked like*:
+it fires N baseline uploads at a deployed service at the same instant and tiles
+a browser window per upload across your screen, so you can watch which sail
+through, which sit on "Checking your file", and which come back busy.
+
+```bash
+npm install && npx playwright install chromium   # one-time
+
+# Four windows at dev, uploading the 5,000-parcel baseline; prompts for the password
+npm run uploads:burst -- \
+  --url https://bng-metric-frontend.dev.cdp-int.defra.cloud --user <gg-user-id>
+
+# Nine 12,000-parcel uploads at once, on an ultrawide, left up to inspect
+BNG_PASSWORD=... npm run uploads:burst -- \
+  --url https://bng-metric-frontend.dev.cdp-int.defra.cloud \
+  --user <gg-user-id> --count 9 --size xlarge --screen 3440x1440 --keep-open
+```
+
+From the harness: `npm run uploads:burst -- --url ... --user ...`.
+`--help` lists every option.
+
+The windows stay up for **10 seconds** after the run so you can read the last
+page each one reached — `--linger <seconds>` to change it, `--linger 0` to close
+at once, or `--keep-open` to wait for Enter instead.
+
+`--size` takes a label from `fixtures/manifest.json` — `normal` (80 parcels),
+`busy` (800), `large` (5,000, the default) or `xlarge` (12,000) — so a window
+uploads exactly the file a JMeter phase would. `--file` takes a path instead.
+
+Three things it does deliberately:
+
+- **Signs in once, but gives every window its own session.** The credential
+  round trip happens once. Each window is then handed the identity provider's
+  cookies **but not the service's**, so it is unauthenticated at the service and
+  its own `/auth/login` mints a session of its own — which SSO answers without
+  asking for anything. Keeping the service's session cookie does not work:
+  `/auth/login` does not short-circuit for an authenticated caller, it writes
+  fresh PKCE state into whatever session the cookie names and the callback
+  writes `auth` into that same one, so every window keeps sharing one session
+  however many times it re-authorises. This matters: the
+  upload journey keeps its state under session keys scoped to the upload TYPE,
+  not the project (`pendingUploadId`, `uploadStartedAt`), so two concurrent
+  uploads sharing a session write to the same slot — the first to finish clears
+  it, and the second is redirected back to the upload form **with no message at
+  all**, looking exactly like a failed upload. `--share-session` opts out and is
+  only safe with `--count 1`.
+
+  Those per-window sign-ins are deliberately **serialised**. They all authorise
+  against the same IdP session, and an identity provider treats one session
+  opening several authorisations at once as the attack it resembles — One Login
+  answers the second with `invalid_request: interaction session and
+  authentication session mismatch`. It costs a redirect each, since SSO answers
+  without asking anything. Only the uploads themselves have to be simultaneous,
+  and they still are.
+- **Holds a starting line.** Each window is walked to the upload form with the
+  file already chosen; only then is every Continue clicked together. Staggered
+  submissions do not reproduce a burst, and the backend's admission control,
+  queue depth and busy responses only engage when requests actually overlap.
+  `--stagger <ms>` if you want the opposite.
+- **Tiles.** Each window is its own browser process with an explicit position
+  and size.
+
+It reports one outcome per window, because they mean different things:
+
+| Outcome | Means |
+| --- | --- |
+| `validated` | The file was checked and accepted. |
+| `busy` | Never looked at — the service said come back. A **healthy** response to a burst, and does not count as a failure. |
+| `returned` | Back on the upload form with something else to say; the message is captured. |
+| `rejected` | Looked at and refused — a problem with the file. |
+| `gave up` | The frontend polled for its full two minutes and stopped. |
+| `no answer` | Nothing conclusive within the budget. |
+
+Two separate budgets, which are easy to confuse:
+
+| Budget | Default | Covers |
+| --- | --- | --- |
+| `--action-timeout` | 60s | One browser action — finding a control, filling it, clicking it. A budget for the **browser** being busy. Raise it when many windows on one machine start timing out on clicks and fills. |
+| `--timeout` | 150s | From submission to a conclusive answer. A budget for the **service**. |
+
+The submit click itself does not wait for the navigation it starts: the click is
+the moment of submission, and what follows is the service's business, tracked by
+the outcome budget. Waiting there put a 30s cap on uploads that legitimately
+take longer — eight large files leaving one machine at once — and reported a
+click timeout for a click that had already worked.
+
+**Every window that does not simply succeed leaves evidence in `reports/`**: a
+full-page screenshot, the final URL, the message it was showing, and the log of
+every request it made to the service with status codes (assets excluded). The
+run prints the non-OK responses inline:
+
+```
+  What the service answered:
+  #1  503 POST /projects/abc/upload-baseline-file
+        reports/burst--1.txt
+```
+
+That is the difference between "one of them ended up back on the form" and
+"one of them was refused with a 503 eleven seconds in".
+
+**`--count` is capped at 12, and the cap is a refusal rather than a clamp.**
+Each window is a Chromium process, so past a dozen they contend with each other,
+the windows are too small to read, and the burst measures your laptop rather
+than the service. That is the point at which the JMeter plan is the right tool.
+
+Playwright is a `devDependency` and the Dockerfile installs with `--omit=dev`,
+so none of this reaches the perf image — a CDP task never drives a browser.
+
+### Signing in
+
+Which provider answers is a deployment fact — the frontend takes a generic
+`OIDC_DISCOVERY_URL` set per environment in the CDP Portal, and nothing in these
+repos names it. `dev` resolves to **Defra ID (Azure AD B2C)** at
+`dcidmtest.b2clogin.com`, the same journey `bng-metric-journey-tests`'
+`defra-id-login.page.js` covers.
+
+Defra ID fronts more than one identity provider, so `/auth/login` lands on a
+chooser — a page of radios — rather than on a sign-in form. Which one you want
+is a preference this code cannot infer, so say it:
+
+```sh
+--auth one-login           # pick GOV.UK One Login on the chooser
+--auth government-gateway  # pick Government Gateway
+--auth auto                # default
+```
+
+`auto` prefers Government Gateway when both are offered, because that is the
+path the journey suite drives and so the one with known-good selectors. It says
+so when it chooses, rather than picking silently.
+
+The provider names are matched loosely ("One Login", "Government Gateway")
+rather than as exact strings: the wording belongs to Defra ID and is in none of
+these repos, so a relabelling should not break the run.
+
+When sign-in fails, the page it actually reached is described — URL, headings,
+buttons, inputs and their labels — and screenshotted to `reports/`. That is the
+thing worth reading: a locator timeout says what this script expected, not what
+it found.
+
+**GOV.UK One Login requires a second factor.** Its own sign-in page says so —
+you need "a way to get security codes ... a UK mobile phone number or an
+authenticator app" — so the scripted `--auth one-login` path can reach the code
+entry page and no further. Use `--manual-login` for One Login. The scripted path
+is still driven as far as it goes, and reports the second factor by name rather
+than timing out.
+
+Two escape hatches, in the order to try them:
+
+- `--show-login` runs the scripted sign-in in a **visible** window, so you can
+  watch which provider answers and where it sticks.
+- `--manual-login` lets you sign in **by hand**, once, in a visible window; the
+  session is then reused by every upload window. It needs no `--user` or
+  password and works whatever the provider asks for — including MFA, which
+  cannot be automated.
+
+The password is never taken on the command line by default: it comes from
+`--password`, `BNG_PASSWORD`, `DEFRA_ID_PASSWORD`, or a masked prompt.
+
 ## Finding the saturation point — the `short` profile
 
 Every other ladder in this suite is calibrated to sit **below** the knee. Every
