@@ -560,14 +560,27 @@ staircase then measure only `POST /baseline/validate/{uploadId}`, so their
 numbers isolate the service's own cost from the uploader's.
 
 The **upload journey** phases are the deliberate exception: each iteration
-drives a real upload from the plan — initiate, multipart POST of that size's
-committed fixture (`JOURNEY_FILE_<SIZE>` to override), then validate — so the
-uploader and its scan are inside the measurement. There is still no client-side
-polling loop: the backend's validate route waits for the scan itself, so the
-`validate incl virus scan` leg carries that wait, the same wall clock a frontend
-user experiences. Note the journey needs `UPLOAD_S3_BUCKET` to name a bucket the
-environment's cdp-uploader may write to (its `CONSUMER_BUCKETS`) — the same
-requirement staging has.
+drives a real upload from the plan, in four legs — initiate, multipart POST of
+that size's committed fixture (`JOURNEY_FILE_<SIZE>` to override), poll until
+the scan finishes, then validate — so the uploader and its scan are inside the
+measurement.
+
+The poll leg is not optional, and assuming it was is what this plan used to get
+wrong. The backend's validate route does wait for the upload to be ready, but
+only for `UPLOAD_READY_TIMEOUT_MS` — **two seconds**, sized as a safety net for
+a caller that has already polled, which is what the frontend does. Calling
+validate the instant the upload returned turned that net into a hard two-second
+deadline on virus scanning, and the journey's validate leg returned 504s
+regardless of load, including at a single user: it was measuring the scanner,
+not the service. So the plan now polls `GET /upload/{uploadId}/status` exactly
+as the frontend does. The wait shows up in its own `wait for scan` leg, the
+`validate` leg is back to measuring validation, and the `end to end` rows still
+bracket the whole iteration — every poll pass included — so the wall clock a
+user experiences is unchanged by the split.
+
+Note the journey needs `UPLOAD_S3_BUCKET` to name a bucket the environment's
+cdp-uploader may write to (its `CONSUMER_BUCKETS`) — the same requirement
+staging has.
 
 ##### Prepared pools — projects that already hold a baseline
 
@@ -729,20 +742,29 @@ run is meaningless.
 | `MIX_{LIST,FETCH,EDIT,VALIDATE}_PERCENT` | `40/25/25/10`                          | The mix, as percent of iterations. Warns if they do not total 100. |
 | `MIX_THINK_MS`                   | `500`                                          | Pacing between mixed-workload iterations.                       |
 | `JOURNEY_FILE_{NORMAL,BUSY,LARGE,XLARGE}` | the committed fixture               | The file that size's journey ladder uploads.                    |
-| `JOURNEY_BUDGET_MS`              | `35000`                                        | Budget for the journey's validate leg. **Above** the backend's own 30 s scan wait — see below. |
+| `JOURNEY_BUDGET_MS`              | `35000`                                        | Budget for the journey's validate leg — validation only, now the scan wait has its own leg. See below. |
 | `JOURNEY_LARGE_BUDGET_MS`        | `60000`                                        | The same, for the non-`normal` sizes.                         |
 | `EDIT_BUDGET_MS`                 | `3000`                                         | Latency budget for one habitat edit.                            |
 | `FETCH_BUDGET_MS`                | `5000`                                         | Latency budget for `GET /projects/{id}`.                        |
 | `CONTENTION_FEATURES`            | `20`                                           | How many features of one project the contention ladder picks from. |
 | `PREPARED_SIZES` / `PI_SIZES`    | _derived from the profile_                     | Which prepared pools staging builds, and how big. Override only to force one. |
 
-**Why `JOURNEY_BUDGET_MS` is above 30 seconds.** The backend's validate route waits
-for the virus scan itself (`waitForUploadReady`), gives up at **30 s** and throws
-`UploadTimeoutError`, which the route turns into a 504. A budget below that made the
-journey's failure mode a red *Duration* assertion at 20 s rather than a slow sample —
-so "the scan queue backed up" read in the report as "the service broke". At 35 s the
-budget sits on the far side of the backend's own timeout, which means a red duration
-here is *slow* and a red status is *broken*, and the two can be told apart.
+**What `JOURNEY_BUDGET_MS` covers now.** It used to be set at 35 s to clear the
+backend's scan wait: the reasoning was that validate blocked on the scan, gave up at
+30 s and 504d, so a budget below that turned "the scan queue backed up" into a red
+*Duration* assertion that read as "the service broke". That reasoning does not
+survive the poll leg. Validate never carried a 30 s scan wait — its internal wait is
+`UPLOAD_READY_TIMEOUT_MS`, two seconds — and now that the plan polls first, the leg
+this budget guards measures validation alone: download from S3, run the engine,
+persist.
+
+It is deliberately still 35 s, and still loose. The budget is a guard, not a target:
+it exists so a red duration means *slow* and a red status means *broken*, and the
+two can be told apart. Tightening it wants a clean run's `validate` p95 to set it
+from — the old number was never derived from one either — so it stays where it is
+until there is one, rather than being swapped for a different guess. A scan that
+backs up no longer touches this number at all; it shows as a slow `wait for scan`
+leg, which is where someone reading the report should now look.
 
 **Running only the everyday half.** `STAGE_UPLOADS=false` is enough on its own:
 with no staged uploads there are no `uploadId`s, and every phase that needed one

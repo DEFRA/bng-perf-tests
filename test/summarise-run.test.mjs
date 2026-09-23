@@ -47,8 +47,8 @@ function buildResults() {
     }
   }
 
-  // Journey legs, three per iteration on one thread, so the end-to-end
-  // reconstruction has triples to close.
+  // Journey legs, four per iteration on one thread — and the scan poll repeats,
+  // so the end-to-end reconstruction has to bracket the span rather than sum it.
   for (const [size, base, steps] of [
     ['normal', 900, [1, 2, 10]],
     ['large', 5200, [1, 3]]
@@ -58,7 +58,10 @@ function buildResults() {
         const thread = `Upload journey ${size} @ ${users} user(s) 1-${u}`
         add(`journey (${size}) @ ${users} user(s): initiate`, 60, '200', thread)
         add(`journey (${size}) @ ${users} user(s): send file to uploader`, 200, '302', thread)
-        add(`journey (${size}) @ ${users} user(s): validate incl virus scan`, base + users * 40, '200', thread)
+        // Two passes before 'ready', as a real scan takes.
+        add(`journey (${size}) @ ${users} user(s): wait for scan`, 30, '200', thread)
+        add(`journey (${size}) @ ${users} user(s): wait for scan`, 30, '200', thread)
+        add(`journey (${size}) @ ${users} user(s): validate`, base + users * 40, '200', thread)
       }
     }
   }

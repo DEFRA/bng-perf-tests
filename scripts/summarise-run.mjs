@@ -325,13 +325,16 @@ function rampCoverageNotes({ short, windowSeconds, usedSeconds }) {
 /**
  * End-to-end times for the upload-journey staircase.
  *
- * Each journey iteration is three sequential samples on one thread — initiate,
- * upload, validate+scan — so the per-leg rows understate what a user actually
- * waits. This reconstructs each iteration from the thread name: an initiate
- * opens it, the next validate+scan on the same thread closes it, and the
- * end-to-end time is last-byte minus first-byte across the triple. An
- * iteration whose initiate failed never opens (the plan skips its other legs),
- * and one cut off by the window's end never closes — both simply don't count.
+ * Each journey iteration is four legs on one thread — initiate, upload, wait
+ * for scan, validate — so the per-leg rows understate what a user actually
+ * waits. The wait leg is a poll, so it contributes as many samples as it took
+ * passes to see 'ready'; that is exactly why the reconstruction brackets the
+ * iteration rather than summing its legs. An initiate opens it, the next
+ * validate on the same thread closes it, and the end-to-end time is last-byte
+ * minus first-byte across the whole span — every poll pass in between included.
+ * An iteration whose initiate failed never opens (the plan skips its other
+ * legs), and one cut off by the window's end never closes — both simply don't
+ * count.
  */
 function journeyTotals(samples) {
   const byStep = new Map()
@@ -393,7 +396,7 @@ function journeyTotals(samples) {
 
 /**
  * The sampler label a journey leg carries:
- * `journey (normal) @ 3 user(s): validate incl virus scan`.
+ * `journey (normal) @ 3 user(s): validate`.
  */
 const JOURNEY_LABEL = /^journey \((\w+)\) @ (\d+) user\(s\): (.+)$/
 
