@@ -49,7 +49,7 @@
  * rejects an UPLOAD_SIZES spec naming anything else — a label the plan does not
  * know stages a file nothing validates.
  */
-export const SIZE_LABELS = ['normal', 'busy', 'large', 'xlarge']
+export const SIZE_LABELS = ['normal', 'medium', 'large', 'xlarge']
 
 /**
  * Shell-safe identifiers. Step properties become `-Jname=value` arguments and
@@ -75,7 +75,7 @@ export const LADDERS = [
       // Contiguous 1..10: the point of a ladder is to find the knee, and
       // 1/2/5/10 cannot tell a cliff at 7 from a slope.
       normal: { steps: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], secondsPerIteration: 4 },
-      busy: { steps: [1, 2, 5, 10], secondsPerIteration: 6 },
+      medium: { steps: [1, 2, 5, 10], secondsPerIteration: 6 },
       large: { steps: [1, 2, 3, 5, 8, 10], secondsPerIteration: 14 },
       xlarge: { steps: [1, 2, 5], secondsPerIteration: 30 }
     },
@@ -202,9 +202,9 @@ export const LADDERS = [
       // ~1.5 s). So the knee could be anywhere from the low 30s to past 64, and
       // contiguous rungs placed by guesswork would likely all land the same
       // side of it. Bracket first, then fill in contiguous rungs on a follow-up
-      // run — the path `normal` and `busy` already took to earn their 10/12/14.
+      // run — the path `normal` and `medium` already took to earn their 10/12/14.
       normal: { steps: [4, 8, 10, 12, 14, 16, 24, 32, 48, 64], secondsPerBurst: 7 },
-      busy: { steps: [4, 8, 10, 12, 14, 16], secondsPerBurst: 9 },
+      medium: { steps: [4, 8, 10, 12, 14, 16], secondsPerBurst: 9 },
       large: { steps: [2, 4, 6, 8, 12], secondsPerBurst: 17 },
       xlarge: { steps: [2, 3, 4, 6], secondsPerBurst: 31 }
     }
@@ -285,7 +285,7 @@ export const PROFILES = {
     ladders: {
       journey: {
         normal: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        busy: [1, 5, 10],
+        medium: [1, 5, 10],
         large: [1, 2, 3, 5, 10]
       },
       revalidate: { large: [1, 2, 5, 10, 20] },
@@ -296,7 +296,7 @@ export const PROFILES = {
     fetchRamp: true,
     mixedSeconds: 120,
     targetScale: 1,
-    sizeRampLoops: { normal: 20, busy: 8, large: 3, xlarge: 2 }
+    sizeRampLoops: { normal: 20, medium: 8, large: 3, xlarge: 2 }
   },
   short: {
     /**
@@ -324,7 +324,7 @@ export const PROFILES = {
      * `large`'s widest rung — the fixture is staged and `UPLOAD_SIZES` defaults
      * to all four sizes, so the cutoff was the only thing in the way. That was
      * a deliberate trade when contiguous 10/12/14 rungs were added to `normal`
-     * and `busy`, and it aged badly: on 4 vCPU `large` served all six rungs
+     * and `medium`, and it aged badly: on 4 vCPU `large` served all six rungs
      * with zero refusals, so the ladder no longer reached the knee for either
      * of the two biggest files.
      *
@@ -361,14 +361,14 @@ export const PROFILES = {
       /**
        * Every rung the ladder lists for a size, minus the cheapest few.
        *
-       * The `4` rung of `normal` and `busy` and `large @ 12` are the only steps
+       * The `4` rung of `normal` and `medium` and `large @ 12` are the only steps
        * left out. The first two refuse nothing on any box that has ever run
        * this and cost 17-19 s each to re-confirm a zero; the third is held in
        * reserve — see the note on `large` below.
        *
        * This used to be a much thinner mix, because at a 300 s cutoff a profile
        * that asked for every rung would have spent the whole run on `normal`
-       * and `busy` and never attempted the two sizes most likely to be refused.
+       * and `medium` and never attempted the two sizes most likely to be refused.
        * At 600 s the whole thing fits with 75 s to spare, so there is nothing
        * left to trade away.
        */
@@ -391,7 +391,7 @@ export const PROFILES = {
          * narrower rung can surface it.
          */
         normal: [8, 10, 12, 14, 16, 24, 32, 48, 64],
-        busy: [8, 10, 12, 14, 16],
+        medium: [8, 10, 12, 14, 16],
         /**
          * May still not bracket `large`: on 4 vCPU it served all six at burst 6
          * cleanly, so burst 8 may come back clean too. The fallback is cheap —
@@ -409,7 +409,7 @@ export const PROFILES = {
     fetchRamp: false,
     mixedSeconds: 0,
     targetScale: 1,
-    sizeRampLoops: { normal: 0, busy: 0, large: 0, xlarge: 0 }
+    sizeRampLoops: { normal: 0, medium: 0, large: 0, xlarge: 0 }
   }
 }
 
@@ -427,8 +427,8 @@ export const FETCH_RAMP = {
   // on the curve. `xlarge` is a single probe: at ~8 s a fetch it would
   // otherwise be a third of this phase for a document two orders of magnitude
   // past anything in the real corpus.
-  loops: { normal: 5, busy: 3, large: 2, xlarge: 1 },
-  secondsPerIteration: { normal: 1, busy: 2, large: 4, xlarge: 8 }
+  loops: { normal: 5, medium: 3, large: 2, xlarge: 1 },
+  secondsPerIteration: { normal: 1, medium: 2, large: 4, xlarge: 8 }
 }
 
 /** Threads the mixed workload runs with. */
@@ -445,7 +445,7 @@ export const MIXED_THREADS = 8
  */
 export const SIZE_ALLOWANCE_SECONDS = {
   normal: 2,
-  busy: 4,
+  medium: 4,
   large: 12,
   xlarge: 26
 }

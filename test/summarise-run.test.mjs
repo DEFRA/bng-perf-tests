@@ -38,7 +38,7 @@ function buildResults() {
 
   for (const [size, ms, n] of [
     ['normal', 400, 20],
-    ['busy', 900, 8],
+    ['medium', 900, 8],
     ['large', 4200, 3],
     ['xlarge', 9000, 2]
   ]) {
@@ -95,7 +95,7 @@ function buildResults() {
   }
   for (const [size, ms, n] of [
     ['normal', 90, 10],
-    ['busy', 260, 6],
+    ['medium', 260, 6],
     ['large', 1400, 4],
     ['xlarge', 3600, 3]
   ]) {
@@ -151,7 +151,7 @@ before(() => {
       encoding: 'utf8',
       env: {
         ...process.env,
-        SIZE_RAMP_EXPECTED: 'normal:20,busy:8,large:3,xlarge:2',
+        SIZE_RAMP_EXPECTED: 'normal:20,medium:8,large:3,xlarge:2',
         SIZE_RAMP_WINDOW_SECONDS: '160'
       }
     }
