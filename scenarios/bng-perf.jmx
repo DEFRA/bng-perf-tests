@@ -34,7 +34,7 @@ UPLOAD LOAD, which answers three questions a PM asks in this order:
   3. What does a normal upload cost?       -&gt; "Size ramp", `normal` label
   4. When does a BIG file become a problem?   -&gt; "Size ramp", the larger labels
 
-     The ramp is ONE user doing a fixed, WEIGHTED pass: 20 normal, 8 busy, 3 large,
+     The ramp is ONE user doing a fixed, WEIGHTED pass: 20 normal, 8 medium, 3 large,
      2 xlarge (sizeLoops*). One user is the point — these numbers only mean
      "the cost of validating this file" if nothing else is hitting the service, which
      rules out giving each size its own thread. But an unweighted pass makes every size
@@ -247,9 +247,9 @@ vars and the delays move with it; override a delay and you own the arithmetic.</
             <stringProp name="Argument.value">${__P(journeyFile_normal,/opt/perftest/fixtures/baseline-normal.gpkg)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
-          <elementProp name="journeyFile_busy" elementType="Argument">
-            <stringProp name="Argument.name">journeyFile_busy</stringProp>
-            <stringProp name="Argument.value">${__P(journeyFile_busy,/opt/perftest/fixtures/baseline-busy.gpkg)}</stringProp>
+          <elementProp name="journeyFile_medium" elementType="Argument">
+            <stringProp name="Argument.name">journeyFile_medium</stringProp>
+            <stringProp name="Argument.value">${__P(journeyFile_medium,/opt/perftest/fixtures/baseline-medium.gpkg)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
           <elementProp name="journeyFile_large" elementType="Argument">
@@ -731,13 +731,13 @@ vars and the delays move with it; override a delay and you own the arithmetic.</
             <hashTree/>
           </hashTree>
         </hashTree>
-        <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="busy x N">
-          <stringProp name="LoopController.loops">${__P(sizeLoopsBusy,8)}</stringProp>
+        <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="medium x N">
+          <stringProp name="LoopController.loops">${__P(sizeLoopsMedium,8)}</stringProp>
           <boolProp name="LoopController.continue_forever">true</boolProp>
         </LoopController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="validation cost vs file size: busy (1 user)">
-            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_busy,)}</stringProp>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="validation cost vs file size: medium (1 user)">
+            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_medium,)}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
             <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -3238,8 +3238,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
           </hashTree>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey busy @ 1 user(s)">
-        <stringProp name="TestPlan.comments">The FULL upload journey at 1 concurrent user(s), busy file —
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey medium @ 1 user(s)">
+        <stringProp name="TestPlan.comments">The FULL upload journey at 1 concurrent user(s), medium file —
 initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
@@ -3250,11 +3250,11 @@ UPLOAD_READY_TIMEOUT_MS — two seconds, a safety net for a caller that has
 already polled, not a scan budget. Calling validate straight after the
 upload turned it into a hard two-second deadline on scanning, and it 504d
 regardless of load — including at a single user.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_busy_1,1)}</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_medium_1,1)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_journey_busy_1,30)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_journey_busy_1,354)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_journey_medium_1,30)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_journey_medium_1,354)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -3297,7 +3297,7 @@ regardless of load — including at a single user.</stringProp>
           <stringProp name="fileEncoding"></stringProp>
         </CSVDataSet>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 1 user(s): initiate">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 1 user(s): initiate">
           <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3348,7 +3348,7 @@ regardless of load — including at a single user.</stringProp>
           <boolProp name="IfController.useExpression">true</boolProp>
         </IfController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 1 user(s): send file to uploader">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 1 user(s): send file to uploader">
             <stringProp name="TestPlan.comments">The backend returns the uploader PATH only, so the full URL is assembled from
 uploaderUrl. A successful upload answers 302 to the redirect target; the
 redirect is NOT followed — it points at the frontend flow, not the API.</stringProp>
@@ -3364,8 +3364,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </elementProp>
             <elementProp name="HTTPsampler.Files" elementType="HTTPFileArgs">
               <collectionProp name="HTTPFileArgs.files">
-                <elementProp name="${journeyFile_busy}" elementType="HTTPFileArg">
-                  <stringProp name="File.path">${journeyFile_busy}</stringProp>
+                <elementProp name="${journeyFile_medium}" elementType="HTTPFileArg">
+                  <stringProp name="File.path">${journeyFile_medium}</stringProp>
                   <stringProp name="File.paramname">file</stringProp>
                   <stringProp name="File.mimetype">application/geopackage+sqlite3</stringProp>
                 </elementProp>
@@ -3387,7 +3387,7 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
           </WhileController>
           <hashTree>
-            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 1 user(s): wait for scan">
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 1 user(s): wait for scan">
               <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
               <stringProp name="HTTPSampler.method">GET</stringProp>
               <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3421,7 +3421,7 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <hashTree/>
             </hashTree>
           </hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 1 user(s): validate">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 1 user(s): validate">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3474,8 +3474,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
           </hashTree>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey busy @ 2 user(s)">
-        <stringProp name="TestPlan.comments">The FULL upload journey at 2 concurrent user(s), busy file —
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey medium @ 2 user(s)">
+        <stringProp name="TestPlan.comments">The FULL upload journey at 2 concurrent user(s), medium file —
 initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
@@ -3486,11 +3486,11 @@ UPLOAD_READY_TIMEOUT_MS — two seconds, a safety net for a caller that has
 already polled, not a scan budget. Calling validate straight after the
 upload turned it into a hard two-second deadline on scanning, and it 504d
 regardless of load — including at a single user.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_busy_2,0)}</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_medium_2,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_journey_busy_2,30)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_journey_busy_2,0)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_journey_medium_2,30)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_journey_medium_2,0)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -3533,7 +3533,7 @@ regardless of load — including at a single user.</stringProp>
           <stringProp name="fileEncoding"></stringProp>
         </CSVDataSet>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 2 user(s): initiate">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 2 user(s): initiate">
           <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3584,7 +3584,7 @@ regardless of load — including at a single user.</stringProp>
           <boolProp name="IfController.useExpression">true</boolProp>
         </IfController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 2 user(s): send file to uploader">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 2 user(s): send file to uploader">
             <stringProp name="TestPlan.comments">The backend returns the uploader PATH only, so the full URL is assembled from
 uploaderUrl. A successful upload answers 302 to the redirect target; the
 redirect is NOT followed — it points at the frontend flow, not the API.</stringProp>
@@ -3600,8 +3600,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </elementProp>
             <elementProp name="HTTPsampler.Files" elementType="HTTPFileArgs">
               <collectionProp name="HTTPFileArgs.files">
-                <elementProp name="${journeyFile_busy}" elementType="HTTPFileArg">
-                  <stringProp name="File.path">${journeyFile_busy}</stringProp>
+                <elementProp name="${journeyFile_medium}" elementType="HTTPFileArg">
+                  <stringProp name="File.path">${journeyFile_medium}</stringProp>
                   <stringProp name="File.paramname">file</stringProp>
                   <stringProp name="File.mimetype">application/geopackage+sqlite3</stringProp>
                 </elementProp>
@@ -3623,7 +3623,7 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
           </WhileController>
           <hashTree>
-            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 2 user(s): wait for scan">
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 2 user(s): wait for scan">
               <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
               <stringProp name="HTTPSampler.method">GET</stringProp>
               <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3657,7 +3657,7 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <hashTree/>
             </hashTree>
           </hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 2 user(s): validate">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 2 user(s): validate">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3710,8 +3710,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
           </hashTree>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey busy @ 5 user(s)">
-        <stringProp name="TestPlan.comments">The FULL upload journey at 5 concurrent user(s), busy file —
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey medium @ 5 user(s)">
+        <stringProp name="TestPlan.comments">The FULL upload journey at 5 concurrent user(s), medium file —
 initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
@@ -3722,11 +3722,11 @@ UPLOAD_READY_TIMEOUT_MS — two seconds, a safety net for a caller that has
 already polled, not a scan budget. Calling validate straight after the
 upload turned it into a hard two-second deadline on scanning, and it 504d
 regardless of load — including at a single user.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_busy_5,5)}</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_medium_5,5)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_journey_busy_5,8)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_journey_busy_5,389)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_journey_medium_5,8)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_journey_medium_5,389)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -3769,7 +3769,7 @@ regardless of load — including at a single user.</stringProp>
           <stringProp name="fileEncoding"></stringProp>
         </CSVDataSet>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 5 user(s): initiate">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 5 user(s): initiate">
           <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3820,7 +3820,7 @@ regardless of load — including at a single user.</stringProp>
           <boolProp name="IfController.useExpression">true</boolProp>
         </IfController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 5 user(s): send file to uploader">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 5 user(s): send file to uploader">
             <stringProp name="TestPlan.comments">The backend returns the uploader PATH only, so the full URL is assembled from
 uploaderUrl. A successful upload answers 302 to the redirect target; the
 redirect is NOT followed — it points at the frontend flow, not the API.</stringProp>
@@ -3836,8 +3836,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </elementProp>
             <elementProp name="HTTPsampler.Files" elementType="HTTPFileArgs">
               <collectionProp name="HTTPFileArgs.files">
-                <elementProp name="${journeyFile_busy}" elementType="HTTPFileArg">
-                  <stringProp name="File.path">${journeyFile_busy}</stringProp>
+                <elementProp name="${journeyFile_medium}" elementType="HTTPFileArg">
+                  <stringProp name="File.path">${journeyFile_medium}</stringProp>
                   <stringProp name="File.paramname">file</stringProp>
                   <stringProp name="File.mimetype">application/geopackage+sqlite3</stringProp>
                 </elementProp>
@@ -3859,7 +3859,7 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
           </WhileController>
           <hashTree>
-            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 5 user(s): wait for scan">
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 5 user(s): wait for scan">
               <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
               <stringProp name="HTTPSampler.method">GET</stringProp>
               <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3893,7 +3893,7 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <hashTree/>
             </hashTree>
           </hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 5 user(s): validate">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 5 user(s): validate">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -3946,8 +3946,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
           </hashTree>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey busy @ 10 user(s)">
-        <stringProp name="TestPlan.comments">The FULL upload journey at 10 concurrent user(s), busy file —
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Upload journey medium @ 10 user(s)">
+        <stringProp name="TestPlan.comments">The FULL upload journey at 10 concurrent user(s), medium file —
 initiate, multipart POST to the CDP Uploader, then validate, as one closed
 loop per user. Every iteration is a real new upload, so the uploader and
 its scanner are inside the number.
@@ -3958,11 +3958,11 @@ UPLOAD_READY_TIMEOUT_MS — two seconds, a safety net for a caller that has
 already polled, not a scan budget. Calling validate straight after the
 upload turned it into a hard two-second deadline on scanning, and it 504d
 regardless of load — including at a single user.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_busy_10,10)}</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_journey_medium_10,10)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_journey_busy_10,8)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_journey_busy_10,402)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_journey_medium_10,8)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_journey_medium_10,402)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -4005,7 +4005,7 @@ regardless of load — including at a single user.</stringProp>
           <stringProp name="fileEncoding"></stringProp>
         </CSVDataSet>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 10 user(s): initiate">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 10 user(s): initiate">
           <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -4056,7 +4056,7 @@ regardless of load — including at a single user.</stringProp>
           <boolProp name="IfController.useExpression">true</boolProp>
         </IfController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 10 user(s): send file to uploader">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 10 user(s): send file to uploader">
             <stringProp name="TestPlan.comments">The backend returns the uploader PATH only, so the full URL is assembled from
 uploaderUrl. A successful upload answers 302 to the redirect target; the
 redirect is NOT followed — it points at the frontend flow, not the API.</stringProp>
@@ -4072,8 +4072,8 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             </elementProp>
             <elementProp name="HTTPsampler.Files" elementType="HTTPFileArgs">
               <collectionProp name="HTTPFileArgs.files">
-                <elementProp name="${journeyFile_busy}" elementType="HTTPFileArg">
-                  <stringProp name="File.path">${journeyFile_busy}</stringProp>
+                <elementProp name="${journeyFile_medium}" elementType="HTTPFileArg">
+                  <stringProp name="File.path">${journeyFile_medium}</stringProp>
                   <stringProp name="File.paramname">file</stringProp>
                   <stringProp name="File.mimetype">application/geopackage+sqlite3</stringProp>
                 </elementProp>
@@ -4095,7 +4095,7 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
             <stringProp name="WhileController.condition">${__jexl3(${__jm__waitForScan__idx} == 0 || (&quot;${uploadReadyStatus}&quot; != &quot;ready&quot; &amp;&amp; ${__jm__waitForScan__idx} &lt; 240),)}</stringProp>
           </WhileController>
           <hashTree>
-            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 10 user(s): wait for scan">
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 10 user(s): wait for scan">
               <stringProp name="HTTPSampler.path">/upload/${journeyUploadId}/status</stringProp>
               <stringProp name="HTTPSampler.method">GET</stringProp>
               <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -4129,7 +4129,7 @@ redirect is NOT followed — it points at the frontend flow, not the API.</strin
               <hashTree/>
             </hashTree>
           </hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (busy) @ 10 user(s): validate">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="journey (medium) @ 10 user(s): validate">
             <stringProp name="HTTPSampler.path">/baseline/validate/${journeyUploadId}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -9823,8 +9823,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <hashTree/>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (busy) @ burst of 4">
-        <stringProp name="TestPlan.comments">4 thread(s) released TOGETHER against one pre-staged busy
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (medium) @ burst of 4">
+        <stringProp name="TestPlan.comments">4 thread(s) released TOGETHER against one pre-staged medium
 upload, climbing deliberately past the point where the validator starts
 refusing. A 503 is the data here, not a failure: it carries
 VALIDATION_BUSY and means the file was never looked at.
@@ -9832,11 +9832,11 @@ VALIDATION_BUSY and means the file was never looked at.
 The reason it was refused (no_capacity | queue_full | queue_wait |
 memory_budget) is NOT on the wire — read the GeoPackageValidationBusy
 metric, or grep the backend log for &quot;validation refused as busy&quot;.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_busy_4,0)}</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_medium_4,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_saturate_busy_4,30)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_busy_4,0)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_saturate_medium_4,30)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_medium_4,0)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -9888,8 +9888,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 4 on one busy upload">
-          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_busy,)}</stringProp>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 4 on one medium upload">
+          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_medium,)}</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -9918,8 +9918,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <hashTree/>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (busy) @ burst of 8">
-        <stringProp name="TestPlan.comments">8 thread(s) released TOGETHER against one pre-staged busy
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (medium) @ burst of 8">
+        <stringProp name="TestPlan.comments">8 thread(s) released TOGETHER against one pre-staged medium
 upload, climbing deliberately past the point where the validator starts
 refusing. A 503 is the data here, not a failure: it carries
 VALIDATION_BUSY and means the file was never looked at.
@@ -9927,11 +9927,11 @@ VALIDATION_BUSY and means the file was never looked at.
 The reason it was refused (no_capacity | queue_full | queue_wait |
 memory_budget) is NOT on the wire — read the GeoPackageValidationBusy
 metric, or grep the backend log for &quot;validation refused as busy&quot;.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_busy_8,0)}</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_medium_8,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_saturate_busy_8,30)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_busy_8,0)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_saturate_medium_8,30)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_medium_8,0)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -9983,8 +9983,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 8 on one busy upload">
-          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_busy,)}</stringProp>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 8 on one medium upload">
+          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_medium,)}</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -10013,8 +10013,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <hashTree/>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (busy) @ burst of 10">
-        <stringProp name="TestPlan.comments">10 thread(s) released TOGETHER against one pre-staged busy
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (medium) @ burst of 10">
+        <stringProp name="TestPlan.comments">10 thread(s) released TOGETHER against one pre-staged medium
 upload, climbing deliberately past the point where the validator starts
 refusing. A 503 is the data here, not a failure: it carries
 VALIDATION_BUSY and means the file was never looked at.
@@ -10022,11 +10022,11 @@ VALIDATION_BUSY and means the file was never looked at.
 The reason it was refused (no_capacity | queue_full | queue_wait |
 memory_budget) is NOT on the wire — read the GeoPackageValidationBusy
 metric, or grep the backend log for &quot;validation refused as busy&quot;.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_busy_10,0)}</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_medium_10,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_saturate_busy_10,30)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_busy_10,0)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_saturate_medium_10,30)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_medium_10,0)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -10078,8 +10078,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 10 on one busy upload">
-          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_busy,)}</stringProp>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 10 on one medium upload">
+          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_medium,)}</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -10108,8 +10108,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <hashTree/>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (busy) @ burst of 12">
-        <stringProp name="TestPlan.comments">12 thread(s) released TOGETHER against one pre-staged busy
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (medium) @ burst of 12">
+        <stringProp name="TestPlan.comments">12 thread(s) released TOGETHER against one pre-staged medium
 upload, climbing deliberately past the point where the validator starts
 refusing. A 503 is the data here, not a failure: it carries
 VALIDATION_BUSY and means the file was never looked at.
@@ -10117,11 +10117,11 @@ VALIDATION_BUSY and means the file was never looked at.
 The reason it was refused (no_capacity | queue_full | queue_wait |
 memory_budget) is NOT on the wire — read the GeoPackageValidationBusy
 metric, or grep the backend log for &quot;validation refused as busy&quot;.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_busy_12,0)}</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_medium_12,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_saturate_busy_12,30)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_busy_12,0)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_saturate_medium_12,30)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_medium_12,0)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -10173,8 +10173,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 12 on one busy upload">
-          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_busy,)}</stringProp>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 12 on one medium upload">
+          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_medium,)}</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -10203,8 +10203,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <hashTree/>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (busy) @ burst of 14">
-        <stringProp name="TestPlan.comments">14 thread(s) released TOGETHER against one pre-staged busy
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (medium) @ burst of 14">
+        <stringProp name="TestPlan.comments">14 thread(s) released TOGETHER against one pre-staged medium
 upload, climbing deliberately past the point where the validator starts
 refusing. A 503 is the data here, not a failure: it carries
 VALIDATION_BUSY and means the file was never looked at.
@@ -10212,11 +10212,11 @@ VALIDATION_BUSY and means the file was never looked at.
 The reason it was refused (no_capacity | queue_full | queue_wait |
 memory_budget) is NOT on the wire — read the GeoPackageValidationBusy
 metric, or grep the backend log for &quot;validation refused as busy&quot;.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_busy_14,0)}</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_medium_14,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_saturate_busy_14,30)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_busy_14,0)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_saturate_medium_14,30)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_medium_14,0)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -10268,8 +10268,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 14 on one busy upload">
-          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_busy,)}</stringProp>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 14 on one medium upload">
+          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_medium,)}</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -10298,8 +10298,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <hashTree/>
         </hashTree>
       </hashTree>
-      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (busy) @ burst of 16">
-        <stringProp name="TestPlan.comments">16 thread(s) released TOGETHER against one pre-staged busy
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Saturation (medium) @ burst of 16">
+        <stringProp name="TestPlan.comments">16 thread(s) released TOGETHER against one pre-staged medium
 upload, climbing deliberately past the point where the validator starts
 refusing. A 503 is the data here, not a failure: it carries
 VALIDATION_BUSY and means the file was never looked at.
@@ -10307,11 +10307,11 @@ VALIDATION_BUSY and means the file was never looked at.
 The reason it was refused (no_capacity | queue_full | queue_wait |
 memory_budget) is NOT on the wire — read the GeoPackageValidationBusy
 metric, or grep the backend log for &quot;validation refused as busy&quot;.</stringProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_busy_16,0)}</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(users_saturate_medium_16,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(window_saturate_busy_16,30)}</stringProp>
-        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_busy_16,0)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(window_saturate_medium_16,30)}</stringProp>
+        <stringProp name="ThreadGroup.delay">${__P(delay_saturate_medium_16,0)}</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
         <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
         <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
@@ -10363,8 +10363,8 @@ metric, or grep the backend log for &quot;validation refused as busy&quot;.</str
           <stringProp name="timeoutInMs">${__P(saturateGateTimeoutMs,120000)}</stringProp>
         </SyncTimer>
         <hashTree/>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 16 on one busy upload">
-          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_busy,)}</stringProp>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="saturation: burst of 16 on one medium upload">
+          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_medium,)}</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -11688,13 +11688,13 @@ loops rather than GETting /projects/ with an empty path segment.</stringProp>
             <hashTree/>
           </hashTree>
         </hashTree>
-        <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="busy x N">
+        <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="medium x N">
           <boolProp name="LoopController.continue_forever">false</boolProp>
-          <stringProp name="LoopController.loops">${__P(fetchLoops_busy,3)}</stringProp>
+          <stringProp name="LoopController.loops">${__P(fetchLoops_medium,3)}</stringProp>
         </LoopController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="fetch busy project (GET /projects/{id})">
-            <stringProp name="HTTPSampler.path">/projects/${__P(sizedProjectId_busy,)}</stringProp>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="fetch medium project (GET /projects/{id})">
+            <stringProp name="HTTPSampler.path">/projects/${__P(sizedProjectId_medium,)}</stringProp>
             <stringProp name="HTTPSampler.method">GET</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
             <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
