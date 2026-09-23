@@ -386,7 +386,7 @@ describe('the saturation cutoff', () => {
     //
     // This deliberately does NOT pin which sizes run. That is a weighting
     // decision in the profile, and it has changed once already: an earlier mix
-    // guaranteed two xlarge rungs, and tightening normal/busy to get quotable
+    // guaranteed two xlarge rungs, and tightening normal/medium to get quotable
     // knees spent that budget. What must hold either way is that whatever runs
     // is interpretable.
     const bySize = new Map()
@@ -620,6 +620,107 @@ describe('the committed plan', () => {
         assert.ok(
           SIZE_LABELS.includes(size),
           `ladder ${ladder.key} names size "${size}", which has no fixture`
+        )
+      }
+    }
+  })
+
+  /**
+   * The one size-keyed property whose NAME is hand-spelled on both sides.
+   *
+   * Every other size-keyed property has its name computed from the label —
+   * `uploadId_${step.size}` in the generator, `uploadId_${result.label}` in
+   * stage-uploads.mjs — so renaming a size carries through on its own.
+   * `sizeLoops<Size>` does not: entrypoint.sh spells it out in an `add_prop`
+   * line, the size-ramp thread groups spell it out in a `__P(...)`, and those
+   * thread groups sit OUTSIDE the generated block, so neither
+   * `npm run gen-scenario` nor `npm run check-scenario` looks at them.
+   *
+   * Left unguarded that drifts silently rather than loudly. `__P(name,default)`
+   * falls back to its default when the property is unset, so a half-finished
+   * rename does not fail — the size ramp quietly runs its hardcoded default
+   * instead of the profile's value. A `short` or `saturate` run sets these to 0
+   * precisely to keep the size ramp OFF the service while it is being pushed to
+   * its refusal point; getting 8 instead would contaminate the measurement the
+   * profile exists to take, and the run would still go green.
+   */
+  test('the size-ramp loop properties agree on both sides, for every size', () => {
+    const jmx = readFileSync(join(ROOT, 'scenarios', 'bng-perf.jmx'), 'utf8')
+    const entrypoint = readFileSync(join(ROOT, 'entrypoint.sh'), 'utf8')
+    const propName = (size) => `sizeLoops${size[0].toUpperCase()}${size.slice(1)}`
+
+    for (const size of SIZE_LABELS) {
+      assert.match(
+        jmx,
+        new RegExp(`\\$\\{__P\\(${propName(size)},`),
+        `bng-perf.jmx never reads \${__P(${propName(size)},…)} — the size ramp ` +
+          `for "${size}" would silently use its hardcoded default`
+      )
+      assert.match(
+        entrypoint,
+        new RegExp(`add_prop ${propName(size)} `),
+        `entrypoint.sh never emits -J${propName(size)} — the size ramp for ` +
+          `"${size}" would silently use its hardcoded default`
+      )
+    }
+
+    // And nothing is left behind pointing at a size that no longer exists: a
+    // rename that updated one side would otherwise leave the old spelling sat
+    // in the other, doing nothing, for the next reader to trust.
+    const known = new Set(SIZE_LABELS.map(propName))
+    const seen = [
+      ...jmx.matchAll(/__P\((sizeLoops\w+),/g),
+      ...entrypoint.matchAll(/add_prop (sizeLoops\w+) /g)
+    ].map((m) => m[1])
+    assert.deepEqual(
+      [...new Set(seen)].filter((name) => !known.has(name)),
+      [],
+      'a sizeLoops property names a size that is not in SIZE_LABELS'
+    )
+  })
+
+  /**
+   * The same drift, in the rest of the hand-written half of the plan.
+   *
+   * The size-ramp thread groups and the plan-level User Defined Variables sit
+   * outside the generated block and spell their size labels out in full —
+   * `journeyFile_<size>` and `uploadId_<size>` as UDV names and sampler paths,
+   * the size in sampler and controller testnames, and the committed fixture's
+   * filename as a `__P` default. The generator writes the same names INSIDE the
+   * block by interpolating `step.size`, so those halves rename themselves and
+   * these do not.
+   *
+   * That asymmetry is the trap: a size rename that regenerates cleanly and
+   * passes check-scenario can still leave the hand-written half pointing at a
+   * label nothing stages, which `__P`'s silent default turns into a wrong
+   * number rather than an error.
+   */
+  test('the hand-written half of the plan names no size the fixtures dropped', () => {
+    const jmx = readFileSync(join(ROOT, 'scenarios', 'bng-perf.jmx'), 'utf8')
+    const handWritten =
+      jmx.slice(0, jmx.indexOf('BEGIN GENERATED')) +
+      jmx.slice(jmx.indexOf('END GENERATED'))
+
+    // Every size-suffixed property the hand-written half names must be a size
+    // that still exists. The suffix is matched loosely on purpose — the point
+    // is to catch a label that SIZE_LABELS no longer has, whatever it spells.
+    const suffixed = [
+      ...handWritten.matchAll(/\b(?:journeyFile|uploadId)_(\w+)/g)
+    ].map((m) => m[1])
+    const unknown = [...new Set(suffixed)].filter((s) => !SIZE_LABELS.includes(s))
+    assert.deepEqual(
+      unknown,
+      [],
+      'the hand-written plan names a size with no fixture behind it'
+    )
+
+    // And every size that IS defined has its pair of properties present, so a
+    // rename cannot half-land by dropping one side.
+    for (const size of SIZE_LABELS) {
+      for (const prefix of ['journeyFile', 'uploadId']) {
+        assert.ok(
+          handWritten.includes(`${prefix}_${size}`),
+          `the hand-written plan never names ${prefix}_${size}`
         )
       }
     }
