@@ -77,7 +77,7 @@ than the flexibility bought, so the suite now runs one well-chosen set — the o
 `deep`. The plan contains **53 ladder steps** and `standard` runs 40 of them: the
 contiguous 1..10 normal journey ladder, both file sizes on every other ladder, the
 full contention ladder, and a two-minute mixed workload — **~18 min of plan against a
-20-minute budget**. (The steps it skips — the `busy` intermediate journeys and the
+20-minute budget**. (The steps it skips — the `medium` intermediate journeys and the
 `xlarge` journey/revalidate extremes — exist in the plan at 0 threads.)
 
 The profile never changes what the plan **contains** — every step has a thread group
@@ -124,7 +124,7 @@ home+list                   |=|
 probe                         |===================================================================|
 size ramp                       |=========|
 journey normal 1..10                     |=======|
-journey busy 1,5,10                                 |==|
+journey medium 1,5,10                                 |==|
 journey large 1..10                                     |=======|
 revalidate large 1..20                                          |=======|
 post-intervention normal                                              |===|
@@ -424,7 +424,7 @@ pool exhaustion to show up, none of which a 30-second phase can see.
 #### The size ramp is one user, and weighted
 
 The ramp runs a single user through a **fixed, weighted pass** — 20 `normal`,
-8 `busy`, 3 `large`, 2 `xlarge` — rather than looping all four evenly until the
+8 `medium`, 3 `large`, 2 `xlarge` — rather than looping all four evenly until the
 clock runs out.
 
 One user is deliberate: `validation cost vs file size: normal (1 user)` only means "what an
@@ -441,7 +441,7 @@ point. Because the pass is loop-count driven, those counts are **exact** rather
 than "whatever fitted" — a run either produces 20 `normal` samples or the
 `SIZE_RAMP_DURATION_SECONDS` guard tripped.
 
-Set the weights with `SIZE_LOOPS_{NORMAL,BUSY,LARGE,XLARGE}`, or run the whole
+Set the weights with `SIZE_LOOPS_{NORMAL,MEDIUM,LARGE,XLARGE}`, or run the whole
 pass more than once with `SIZE_RAMP_LOOPS`.
 
 ##### The window is derived from the weights, and a short pass says so
@@ -461,7 +461,7 @@ allowance, and the window is what the weighted pass adds up to.
 | Allowance                          | Default | Per validate of |
 | ---------------------------------- | ------- | --------------- |
 | `SIZE_ALLOWANCE_NORMAL_SECONDS`  | `2`     | 80 parcels      |
-| `SIZE_ALLOWANCE_BUSY_SECONDS`      | `4`     | 800 parcels     |
+| `SIZE_ALLOWANCE_MEDIUM_SECONDS`      | `4`     | 800 parcels     |
 | `SIZE_ALLOWANCE_LARGE_SECONDS`     | `12`    | 5 000 parcels   |
 | `SIZE_ALLOWANCE_XLARGE_SECONDS`    | `26`    | 12 000 parcels  |
 
@@ -480,7 +480,7 @@ dead air, which is why every run reports what it actually used:
 Did the size ramp complete its pass?
   size      expected  got
   normal  20        20
-  busy      8         8
+  medium    8         8
   large     3         1  ← CUT OFF
   xlarge    2         0  ← CUT OFF
 
@@ -538,7 +538,7 @@ where the service stops coping, not because anyone submits them today.
 | Label      | Parcels | File size | Generation |
 | ---------- | ------- | --------- | ---------- |
 | `normal` | 80      | 140 KB    | 0.02 s     |
-| `busy`     | 800     | 704 KB    | 0.08 s     |
+| `medium`   | 800     | 704 KB    | 0.08 s     |
 | `large`    | 5 000   | 4.0 MB    | 1.6 s      |
 | `xlarge`   | 12 000  | 9.3 MB    | 9.0 s      |
 
@@ -560,14 +560,27 @@ staircase then measure only `POST /baseline/validate/{uploadId}`, so their
 numbers isolate the service's own cost from the uploader's.
 
 The **upload journey** phases are the deliberate exception: each iteration
-drives a real upload from the plan — initiate, multipart POST of that size's
-committed fixture (`JOURNEY_FILE_<SIZE>` to override), then validate — so the
-uploader and its scan are inside the measurement. There is still no client-side
-polling loop: the backend's validate route waits for the scan itself, so the
-`validate incl virus scan` leg carries that wait, the same wall clock a frontend
-user experiences. Note the journey needs `UPLOAD_S3_BUCKET` to name a bucket the
-environment's cdp-uploader may write to (its `CONSUMER_BUCKETS`) — the same
-requirement staging has.
+drives a real upload from the plan, in four legs — initiate, multipart POST of
+that size's committed fixture (`JOURNEY_FILE_<SIZE>` to override), poll until
+the scan finishes, then validate — so the uploader and its scan are inside the
+measurement.
+
+The poll leg is not optional, and assuming it was is what this plan used to get
+wrong. The backend's validate route does wait for the upload to be ready, but
+only for `UPLOAD_READY_TIMEOUT_MS` — **two seconds**, sized as a safety net for
+a caller that has already polled, which is what the frontend does. Calling
+validate the instant the upload returned turned that net into a hard two-second
+deadline on virus scanning, and the journey's validate leg returned 504s
+regardless of load, including at a single user: it was measuring the scanner,
+not the service. So the plan now polls `GET /upload/{uploadId}/status` exactly
+as the frontend does. The wait shows up in its own `wait for scan` leg, the
+`validate` leg is back to measuring validation, and the `end to end` rows still
+bracket the whole iteration — every poll pass included — so the wall clock a
+user experiences is unchanged by the split.
+
+Note the journey needs `UPLOAD_S3_BUCKET` to name a bucket the environment's
+cdp-uploader may write to (its `CONSUMER_BUCKETS`) — the same requirement
+staging has.
 
 ##### Prepared pools — projects that already hold a baseline
 
@@ -640,7 +653,7 @@ either: a failure to build the project pool, and a failure to stage *any* size a
 
 ##### The size labels are fixed; the sizes are not
 
-`scenarios/bng-perf.jmx` reads `uploadId_normal`, `uploadId_busy`,
+`scenarios/bng-perf.jmx` reads `uploadId_normal`, `uploadId_medium`,
 `uploadId_large` and `uploadId_xlarge` by name — the generator writes one
 sampler per size from `SIZE_LABELS` in `scenarios/ladders.config.mjs`. So
 `UPLOAD_SIZES` sets **how big each step is**, which is the point of it, but not
@@ -654,7 +667,7 @@ anything but bad numbers, so `stage-uploads.mjs` rejects both up front:
 
 ```
 stage-uploads failed: UPLOAD_SIZES must name exactly the labels
-scenarios/bng-perf.jmx reads (normal, busy, large, xlarge) — not in the plan:
+scenarios/bng-perf.jmx reads (normal, medium, large, xlarge) — not in the plan:
 huge. Change the parcel counts, not the labels.
 ```
 
@@ -701,7 +714,7 @@ run is meaningless.
 | -------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
 | `PROFILE`                        | unset → `standard`                             | **The CDP portal's Profile field.** Names a profile (`standard` \| `short`). This is the variable a CDP task carries; every run states what it resolved. |
 | `TEST_SCENARIO`                  | `bng-perf`                                     | Names a **plan** (`scenarios/<name>.jmx`), and — second, for local runs — a profile. Owned by the base image, never set by the portal. |
-| `UPLOAD_SIZES`                   | `normal:80,busy:800,large:5000,xlarge:12000` | How big each step is. `label:parcels` pairs — the **labels are fixed**, see below. |
+| `UPLOAD_SIZES`                   | `normal:80,medium:800,large:5000,xlarge:12000` | How big each step is. `label:parcels` pairs — the **labels are fixed**, see below. |
 | `STAGE_UPLOADS`                  | `true` for this plan                           | `false` skips staging *and* every phase that needed it.         |
 | `CDP_UPLOADER_URL`               | `https://cdp-uploader.<ENVIRONMENT>.cdp-int.defra.cloud` | The uploader to POST staged files to.                 |
 | `PROJECT_POOL_SIZE`              | `40`                                           | Projects to spread concurrent writes across. Keep ≥ max threads. |
@@ -715,10 +728,10 @@ run is meaningless.
 | `NORMAL_BUDGET_MS`             | `5000`                                         | Tighter budget for the normal-sized file.                     |
 | `VALIDATE_RESPONSE_TIMEOUT_MS`   | `120000`                                       | Socket timeout — above this a sample is an error, not a slow success. |
 | `SIZE_RAMP_DURATION_SECONDS`     | _derived_ (`160`)                              | Window reserved for the size-ramp pass. Derived from the weights and the allowances below; override and you own it. |
-| `SIZE_ALLOWANCE_{NORMAL,BUSY,LARGE,XLARGE}_SECONDS` | `2/4/12/26`               | Time allowed per validate of each size. This is what the window is derived from. |
+| `SIZE_ALLOWANCE_{NORMAL,MEDIUM,LARGE,XLARGE}_SECONDS` | `2/4/12/26`               | Time allowed per validate of each size. This is what the window is derived from. |
 | `SIZE_RAMP_THREADS`              | `1`                                            | Users on the size ramp. `0` suppresses the phase — see below.    |
 | `SIZE_RAMP_LOOPS`                | `1`                                            | Weighted passes over the four sizes.                            |
-| `SIZE_LOOPS_{NORMAL,BUSY,LARGE,XLARGE}` | `20/8/3/2`                            | Samples per size in a pass. Weighted so small files earn a percentile. |
+| `SIZE_LOOPS_{NORMAL,MEDIUM,LARGE,XLARGE}` | `20/8/3/2`                            | Samples per size in a pass. Weighted so small files earn a percentile. |
 | `SIZE_RAMP_DELAY_SECONDS`        | _derived_                                      | When the size ramp starts.                                      |
 | ~~`PERF_PROFILE`~~               | —                                              | **Ignored.** Use `PROFILE` — it is the only knob for what runs. |
 | `PERF_DUMP_SCHEDULE`             | unset                                          | `true` prints the resolved schedule and exits, touching nothing. |
@@ -728,21 +741,30 @@ run is meaningless.
 | `MIX_THREADS`                    | `8`                                            | Threads on the mixed workload.                                  |
 | `MIX_{LIST,FETCH,EDIT,VALIDATE}_PERCENT` | `40/25/25/10`                          | The mix, as percent of iterations. Warns if they do not total 100. |
 | `MIX_THINK_MS`                   | `500`                                          | Pacing between mixed-workload iterations.                       |
-| `JOURNEY_FILE_{NORMAL,BUSY,LARGE,XLARGE}` | the committed fixture               | The file that size's journey ladder uploads.                    |
-| `JOURNEY_BUDGET_MS`              | `35000`                                        | Budget for the journey's validate leg. **Above** the backend's own 30 s scan wait — see below. |
+| `JOURNEY_FILE_{NORMAL,MEDIUM,LARGE,XLARGE}` | the committed fixture               | The file that size's journey ladder uploads.                    |
+| `JOURNEY_BUDGET_MS`              | `35000`                                        | Budget for the journey's validate leg — validation only, now the scan wait has its own leg. See below. |
 | `JOURNEY_LARGE_BUDGET_MS`        | `60000`                                        | The same, for the non-`normal` sizes.                         |
 | `EDIT_BUDGET_MS`                 | `3000`                                         | Latency budget for one habitat edit.                            |
 | `FETCH_BUDGET_MS`                | `5000`                                         | Latency budget for `GET /projects/{id}`.                        |
 | `CONTENTION_FEATURES`            | `20`                                           | How many features of one project the contention ladder picks from. |
 | `PREPARED_SIZES` / `PI_SIZES`    | _derived from the profile_                     | Which prepared pools staging builds, and how big. Override only to force one. |
 
-**Why `JOURNEY_BUDGET_MS` is above 30 seconds.** The backend's validate route waits
-for the virus scan itself (`waitForUploadReady`), gives up at **30 s** and throws
-`UploadTimeoutError`, which the route turns into a 504. A budget below that made the
-journey's failure mode a red *Duration* assertion at 20 s rather than a slow sample —
-so "the scan queue backed up" read in the report as "the service broke". At 35 s the
-budget sits on the far side of the backend's own timeout, which means a red duration
-here is *slow* and a red status is *broken*, and the two can be told apart.
+**What `JOURNEY_BUDGET_MS` covers now.** It used to be set at 35 s to clear the
+backend's scan wait: the reasoning was that validate blocked on the scan, gave up at
+30 s and 504d, so a budget below that turned "the scan queue backed up" into a red
+*Duration* assertion that read as "the service broke". That reasoning does not
+survive the poll leg. Validate never carried a 30 s scan wait — its internal wait is
+`UPLOAD_READY_TIMEOUT_MS`, two seconds — and now that the plan polls first, the leg
+this budget guards measures validation alone: download from S3, run the engine,
+persist.
+
+It is deliberately still 35 s, and still loose. The budget is a guard, not a target:
+it exists so a red duration means *slow* and a red status means *broken*, and the
+two can be told apart. Tightening it wants a clean run's `validate` p95 to set it
+from — the old number was never derived from one either — so it stays where it is
+until there is one, rather than being swapped for a different guess. A scan that
+backs up no longer touches this number at all; it shows as a slow `wait for scan`
+leg, which is where someone reading the report should now look.
 
 **Running only the everyday half.** `STAGE_UPLOADS=false` is enough on its own:
 with no staged uploads there are no `uploadId`s, and every phase that needed one
@@ -1155,7 +1177,7 @@ produces an identical run and headroom costs nothing. That is why it is 600
 rather than the 540 that would just fit — 15 s of margin is one window tweak
 away from silently losing the tail again.
 
-The mix runs **contiguous rungs for `normal` and `busy`** (8/10/12/14/16),
+The mix runs **contiguous rungs for `normal` and `medium`** (8/10/12/14/16),
 because those were the two sizes whose brackets were too wide to quote —
 `normal` first refused at 24 on one run and at 16 on the next — plus a coarse
 **32 / 48 / 64** bracket on `normal`. That last one is the everyday file, and on
@@ -1163,7 +1185,7 @@ because those were the two sizes whose brackets were too wide to quote —
 than 24"; its knee cannot be extrapolated either, because its geometry step
 disappears into the fixed pipeline cost (every rung from 10 to 16 came back at a
 flat ~1.5 s). Bracket coarsely first, fill in contiguous rungs on a follow-up —
-the path `normal` and `busy` already took. Be ready for the answer to come from
+the path `normal` and `medium` already took. Be ready for the answer to come from
 somewhere new: at 48-64 concurrent uploads the main-thread pipeline is doing far
 more work than the worker pool, so the constraint may be the event loop rather
 than the queue. That would itself be the finding.

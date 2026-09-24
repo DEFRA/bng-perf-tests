@@ -38,7 +38,7 @@ function buildResults() {
 
   for (const [size, ms, n] of [
     ['normal', 400, 20],
-    ['busy', 900, 8],
+    ['medium', 900, 8],
     ['large', 4200, 3],
     ['xlarge', 9000, 2]
   ]) {
@@ -47,8 +47,8 @@ function buildResults() {
     }
   }
 
-  // Journey legs, three per iteration on one thread, so the end-to-end
-  // reconstruction has triples to close.
+  // Journey legs, four per iteration on one thread — and the scan poll repeats,
+  // so the end-to-end reconstruction has to bracket the span rather than sum it.
   for (const [size, base, steps] of [
     ['normal', 900, [1, 2, 10]],
     ['large', 5200, [1, 3]]
@@ -58,7 +58,10 @@ function buildResults() {
         const thread = `Upload journey ${size} @ ${users} user(s) 1-${u}`
         add(`journey (${size}) @ ${users} user(s): initiate`, 60, '200', thread)
         add(`journey (${size}) @ ${users} user(s): send file to uploader`, 200, '302', thread)
-        add(`journey (${size}) @ ${users} user(s): validate incl virus scan`, base + users * 40, '200', thread)
+        // Two passes before 'ready', as a real scan takes.
+        add(`journey (${size}) @ ${users} user(s): wait for scan`, 30, '200', thread)
+        add(`journey (${size}) @ ${users} user(s): wait for scan`, 30, '200', thread)
+        add(`journey (${size}) @ ${users} user(s): validate`, base + users * 40, '200', thread)
       }
     }
   }
@@ -92,7 +95,7 @@ function buildResults() {
   }
   for (const [size, ms, n] of [
     ['normal', 90, 10],
-    ['busy', 260, 6],
+    ['medium', 260, 6],
     ['large', 1400, 4],
     ['xlarge', 3600, 3]
   ]) {
@@ -148,7 +151,7 @@ before(() => {
       encoding: 'utf8',
       env: {
         ...process.env,
-        SIZE_RAMP_EXPECTED: 'normal:20,busy:8,large:3,xlarge:2',
+        SIZE_RAMP_EXPECTED: 'normal:20,medium:8,large:3,xlarge:2',
         SIZE_RAMP_WINDOW_SECONDS: '160'
       }
     }
