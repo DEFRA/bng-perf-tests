@@ -11,8 +11,12 @@
  * Three things it does that a loop of `playwright test` would not:
  *
  *  - IT SIGNS IN ONCE. The Defra ID round trip takes seconds, and hitting the
- *    real IdP N times risks tripping account lockout. One login produces a
- *    storage state every window reuses, so the burst is not gated on auth.
+ *    real IdP N times with credentials risks tripping account lockout. One
+ *    login yields the identity provider's cookies; each window is handed those
+ *    but NOT the service's own, so it gets a session of its own and signs
+ *    itself in from SSO without being asked for anything. Those per-window
+ *    sign-ins run one at a time — the IdP refuses concurrent authorisations
+ *    on one session — and only the uploads are simultaneous.
  *  - IT HOLDS A STARTING LINE. Every window is walked to the upload form with
  *    the file already chosen, and only then are all the Continue buttons
  *    clicked together. Staggered submissions do not reproduce a burst, and a
@@ -28,6 +32,7 @@
  */
 import { chromium } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
+import { rmSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -106,6 +111,9 @@ const DEFAULT_LINGER_SECONDS = 10
 const SETUP_TIMEOUT = 60_000
 const OUTCOME_TIMEOUT = 150_000
 
+/** The conventional exit status for a process ended by SIGINT (128 + 2). */
+const EXIT_INTERRUPTED = 130
+
 /** macOS reserves the top of the screen for the menu bar. */
 const MAC_MENU_BAR_PX = 28
 
@@ -131,7 +139,7 @@ const info = (msg) => console.log(msg)
 const warn = (msg) => console.warn(color('yellow', `! ${msg}`))
 const fail = (msg) => console.error(color('red', `x ${msg}`))
 
-const HELP = `
+export const HELP = `
 Fire N concurrent baseline uploads at the BNG Metric service in tiled windows.
 
   node scripts/concurrent-uploads.mjs --url <base-url> --user <id> [options]
@@ -148,7 +156,7 @@ Password (pick one)
   --password <pw>      Read from BNG_PASSWORD if omitted. If neither is set the
                        script prompts, which keeps it out of your shell history.
   --manual-login       Skip all of that: sign in yourself in a visible window,
-                       once, and the session is reused by every upload window.
+                       once, and every upload window signs itself in from it.
                        The answer to MFA, which cannot be automated.
   --share-session      Let every window share the one sign-in. Faster, but the
                        upload journey keeps per-USER session state, so
@@ -769,14 +777,34 @@ function settle(promise, label) {
 }
 
 /**
+ * What a message on the upload form means.
+ *
+ * The frontend sends every non-validated ending back to the upload form with
+ * its text in the error summary — busy, timed out and "fix your file" alike —
+ * so the text is the only thing that tells them apart. Busy is checked first:
+ * it is the frontend's give-up for a validator that stayed busy, and it is the
+ * answer a burst most wants to see labelled correctly. The wording mirrors
+ * bng-metric-frontend's habitat-upload-received-controller.js.
+ */
+export function classifyMessage(text) {
+  if (/service is busy/i.test(text)) {
+    return 'busy'
+  }
+  if (/file check timed out/i.test(text)) {
+    return 'gave up'
+  }
+  return 'returned'
+}
+
+/**
  * Watch one window until the service has said something conclusive.
  *
  * Four ways a burst ends, and they mean different things: the summary page
  * means the file was validated, /error-file means it was looked at and refused,
  * the busy message means it was never looked at and the user should retry, and
- * the frontend's own give-up page means it polled for two minutes and stopped.
- * Collapsing them into pass/fail would hide the distinction the whole exercise
- * is about.
+ * the frontend's own time-out message means it polled for two minutes and
+ * stopped. Collapsing them into pass/fail would hide the distinction the whole
+ * exercise is about.
  */
 export async function awaitOutcome(page, projectId, timeoutMs) {
   const options = { timeout: timeoutMs }
@@ -789,23 +817,23 @@ export async function awaitOutcome(page, projectId, timeoutMs) {
       'validated'
     ),
     settle(page.waitForURL(/\/error-file/, options), 'rejected'),
-    settle(page.getByText(/service is busy/i).first().waitFor(options), 'busy'),
-    settle(
-      page
-        .getByText(/taking longer than expected|try again later/i)
-        .first()
-        .waitFor(options),
-      'gave up'
-    ),
     // Back on the upload form with something to say. The upload page renders
-    // every message this way (UploadHabitatFilePage's errorSummary), so this
-    // catches both "busy, come back" and a real complaint about the file —
-    // which is why the text decides which it was rather than the locator.
-    settle(page.getByRole('alert').first().waitFor(options), 'returned'),
+    // every message this way (UploadHabitatFilePage's errorSummary), so the
+    // text decides what it was rather than the locator.
+    settle(page.getByRole('alert').first().waitFor(options), 'message'),
+    // The form reloaded but could not start another upload — not an alert,
+    // just a paragraph where the form should be.
+    settle(
+      page.getByText(/unable to start file upload/i).first().waitFor(options),
+      'no form'
+    ),
     new Promise((resolve) => setTimeout(() => resolve('no answer'), timeoutMs))
   ])
 
-  if (label !== 'returned' && label !== 'busy') {
+  if (label === 'no form') {
+    return { outcome: 'returned', detail: 'Unable to start file upload' }
+  }
+  if (label !== 'message') {
     return { outcome: label, detail: null }
   }
 
@@ -815,10 +843,11 @@ export async function awaitOutcome(page, projectId, timeoutMs) {
     .innerText()
     .catch(() => '')
   const message = text.replaceAll(/\s+/g, ' ').trim().slice(0, MAX_MESSAGE_CHARS)
-  if (/busy/i.test(message) || label === 'busy') {
-    return { outcome: 'busy', detail: message || null }
+  const outcome = classifyMessage(message)
+  return {
+    outcome,
+    detail: message || (outcome === 'returned' ? page.url() : null)
   }
-  return { outcome: 'returned', detail: message || page.url() }
 }
 
 /**
@@ -907,22 +936,6 @@ export async function saveWindowEvidence(page, label, entries, result) {
 }
 
 /**
- * Give this window its OWN frontend session.
- *
- * Sharing one session across every window is wrong for this journey, and
- * silently so. The upload flow keeps its state under session keys scoped to the
- * upload TYPE, not to the project — `pendingUploadId`, `uploadStartedAt` — so
- * two concurrent baseline uploads in one session are writing to the same slot.
- * The first to finish calls clearUploadSession(); the second's next poll finds
- * no pendingUploadId and is redirected back to the upload form with no message
- * at all, because that path sets none. It looks exactly like a failed upload
- * and is nothing of the sort.
- *
- * Re-running /auth/login in a fresh context mints a new frontend session. The
- * IdP cookies came along in the storage state, so its own SSO answers the
- * redirect without asking for anything — no credentials, no second factor.
- */
-/**
  * Take the SERVICE's own cookies out of a storage state, leaving the identity
  * provider's.
  *
@@ -972,6 +985,22 @@ async function hasOidcError(page) {
     .catch(() => false)
 }
 
+/**
+ * Give this window its OWN frontend session.
+ *
+ * Sharing one session across every window is wrong for this journey, and
+ * silently so. The upload flow keeps its state under session keys scoped to the
+ * upload TYPE, not to the project — `pendingUploadId`, `uploadStartedAt` — so
+ * two concurrent baseline uploads in one session are writing to the same slot.
+ * The first to finish calls clearUploadSession(); the second's next poll finds
+ * no pendingUploadId and is redirected back to the upload form with no message
+ * at all, because that path sets none. It looks exactly like a failed upload
+ * and is nothing of the sort.
+ *
+ * The window arrives holding only the identity provider's cookies (see
+ * stripServiceCookies), so /auth/login here starts a brand-new frontend session
+ * and the IdP's SSO answers the redirect without asking for anything.
+ */
 export async function establishOwnSession(page, baseUrl) {
   await page.goto(`${baseUrl}/auth/login`, {
     waitUntil: 'domcontentloaded',
@@ -1107,7 +1136,9 @@ export function summarise(results, fileLabel, count) {
 
 async function closeAll(windows) {
   await Promise.all(
-    windows.map((w) => w.browser.close().catch(() => undefined))
+    windows
+      .filter(Boolean)
+      .map((w) => w.browser.close().catch(() => undefined))
   )
 }
 
@@ -1130,6 +1161,34 @@ export function parseCount(value) {
     )
   }
   return count
+}
+
+/**
+ * A duration or delay flag: a non-negative finite number, or a refusal naming
+ * the flag. A bare Number() let `--timeout 150s` through as NaN, which reads
+ * as an instant timeout and turned every window into "no answer".
+ */
+export function parseNonNegative(flag, value, fallback) {
+  if (value === undefined) {
+    return fallback
+  }
+  const n = Number(value)
+  if (value === '' || !Number.isFinite(n) || n < 0) {
+    throw new Error(`${flag} must be a non-negative number, got "${value}"`)
+  }
+  return n
+}
+
+/** Tile columns: a positive integer, or undefined for the default layout. */
+export function parseCols(value) {
+  if (value === undefined) {
+    return undefined
+  }
+  const cols = Number(value)
+  if (!Number.isInteger(cols) || cols < 1) {
+    throw new Error(`--cols must be a positive integer, got "${value}"`)
+  }
+  return cols
 }
 
 /** The size ladder this suite already generates and commits. */
@@ -1211,6 +1270,23 @@ async function resolveOptions(args) {
   // Everything cheap is validated before the prompt, so a typo in --screen
   // fails immediately rather than after you have typed a password.
   const screen = parseScreen(args.screen) ?? detectScreen()
+  const cols = parseCols(args.cols)
+  const staggerMs = parseNonNegative('--stagger', args.stagger, 0)
+  const lingerSeconds = parseNonNegative(
+    '--linger',
+    args.linger,
+    DEFAULT_LINGER_SECONDS
+  )
+  const outcomeTimeout = parseNonNegative(
+    '--timeout',
+    args.timeout,
+    OUTCOME_TIMEOUT
+  )
+  const actionTimeout = parseNonNegative(
+    '--action-timeout',
+    args['action-timeout'],
+    DEFAULT_ACTION_TIMEOUT
+  )
 
   // Nothing is asked for when a human is doing the signing in.
   let password = null
@@ -1237,12 +1313,12 @@ async function resolveOptions(args) {
     filePath,
     headless: Boolean(args.headless),
     keepOpen: Boolean(args['keep-open']),
-    staggerMs: Number(args.stagger ?? 0),
-    lingerSeconds: Number(args.linger ?? DEFAULT_LINGER_SECONDS),
-    outcomeTimeout: Number(args.timeout ?? OUTCOME_TIMEOUT),
-    actionTimeout: Number(args['action-timeout'] ?? DEFAULT_ACTION_TIMEOUT),
+    staggerMs,
+    lingerSeconds,
+    outcomeTimeout,
+    actionTimeout,
     screen,
-    cols: args.cols ? Number(args.cols) : undefined
+    cols
   }
 }
 
@@ -1264,32 +1340,45 @@ function describeRun(opts, layout) {
   }
 }
 
-/** Sign in once and return the path to a storage state every window can share. */
+/**
+ * Sign in once and return the resulting storage state, in a private temp dir
+ * the caller must remove. Nothing is left on disk if sign-in fails.
+ */
 async function mintSession(opts) {
-  const authDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bng-burst-'))
-  const statePath = path.join(authDir, 'state.json')
   // Headed for a manual sign-in, for the obvious reason — and for --show-login,
   // where watching the scripted attempt IS the point.
   const browser = await chromium.launch({
     headless: !(opts.manualLogin || opts.showLogin),
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   })
-  const context = await browser.newContext({ baseURL: opts.baseUrl })
-  const page = await context.newPage()
+  let authDir = null
+  let page = null
   try {
+    const context = await browser.newContext({ baseURL: opts.baseUrl })
+    page = await context.newPage()
     if (opts.manualLogin) {
       await manualSignIn(page, opts.baseUrl)
     } else {
       await signIn(page, opts.baseUrl, opts.username, opts.password, opts.auth)
     }
+    // Only now, with something worth keeping, so no earlier failure can leave
+    // an empty-looking dir behind that is not.
+    authDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bng-burst-'))
+    const statePath = path.join(authDir, 'state.json')
     await context.storageState({ path: statePath })
     return { authDir, statePath }
   } catch (err) {
     // Describe the page BEFORE the browser goes away — this is the one moment
     // the evidence exists.
-    err.pageReport = await describeSignInPage(page, REPORT_DIR).catch(
-      () => null
-    )
+    if (page) {
+      err.pageReport = await describeSignInPage(page, REPORT_DIR).catch(
+        () => null
+      )
+    }
+    // Whatever made it into the dir is a live IdP session; do not leave it.
+    if (authDir) {
+      await fs.rm(authDir, { recursive: true, force: true })
+    }
     throw err
   } finally {
     await browser.close()
@@ -1353,8 +1442,8 @@ async function main() {
   info('')
   info(
     opts.manualLogin
-      ? '> waiting for you to sign in (once - every window reuses the session)'
-      : '> signing in (the slow bit - one login, shared by every window)'
+      ? '> waiting for you to sign in (once - every window signs in from it)'
+      : '> signing in (the slow bit - one login, every window signs in from it)'
   )
   let session
   try {
@@ -1380,6 +1469,29 @@ async function main() {
     return 1
   }
 
+  // The auth dir holds a live IdP session and each window is a browser process,
+  // so both go on every way out — a failure or an exception included, not only
+  // a clean finish. Ctrl-C skips `finally`, hence the synchronous handler.
+  const windows = []
+  const onInterrupt = () => {
+    rmSync(session.authDir, { recursive: true, force: true })
+    process.exit(EXIT_INTERRUPTED)
+  }
+  process.once('SIGINT', onInterrupt)
+  try {
+    return await runBurst(opts, layout, session, windows)
+  } finally {
+    process.off('SIGINT', onInterrupt)
+    await closeAll(windows)
+    await fs.rm(session.authDir, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Everything after sign-in. `windows` is the caller's, filled in as each one
+ * opens, so the caller can close whatever was opened however this ends.
+ */
+async function runBurst(opts, layout, session, windows) {
   // Every window starts from the IdP cookies ONLY, so each one signs itself in
   // and gets a session of its own. Sharing the service's session cookie is what
   // made two concurrent uploads clobber each other's pendingUploadId.
@@ -1403,16 +1515,22 @@ async function main() {
   info('')
   info(`> opening ${opts.count} window(s) and staging the upload in each`)
   const stamp = Date.now()
-  const windows = await Promise.all(
-    layout.cells.map((cell) =>
-      openWindow(cell, {
+  // allSettled, not all: if one launch fails, the others must have finished
+  // launching before the caller closes them, or they escape the cleanup.
+  const launches = await Promise.allSettled(
+    layout.cells.map(async (cell, i) => {
+      windows[i] = await openWindow(cell, {
         headless: opts.headless,
         storageState: windowState,
         baseUrl: opts.baseUrl,
         actionTimeout: opts.actionTimeout
       })
-    )
+    })
   )
+  const failedLaunch = launches.find((l) => l.status === 'rejected')
+  if (failedLaunch) {
+    throw failedLaunch.reason
+  }
 
   // Recording starts before the journey does, so sign-in, project creation and
   // the upload are all in the log when something goes wrong later.
@@ -1471,7 +1589,6 @@ async function main() {
   const ready = staged.filter((s) => s.ready)
   if (ready.length === 0) {
     fail('No window reached the upload form - nothing to submit')
-    await closeAll(windows)
     return 1
   }
   if (ready.length < opts.count) {
@@ -1553,9 +1670,6 @@ async function main() {
   const broken = summarise(results, path.basename(opts.filePath), ready.length)
 
   await lingerBeforeClosing(opts)
-
-  await closeAll(windows)
-  await fs.rm(session.authDir, { recursive: true, force: true })
   return broken > 0 ? 1 : 0
 }
 

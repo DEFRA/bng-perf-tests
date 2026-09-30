@@ -1045,9 +1045,9 @@ It reports one outcome per window, because they mean different things:
 | --- | --- |
 | `validated` | The file was checked and accepted. |
 | `busy` | Never looked at — the service said come back. A **healthy** response to a burst, and does not count as a failure. |
-| `returned` | Back on the upload form with something else to say; the message is captured. |
+| `returned` | Back on the upload form with something else to say — or unable to start another upload there; the message is captured. |
 | `rejected` | Looked at and refused — a problem with the file. |
-| `gave up` | The frontend polled for its full two minutes and stopped. |
+| `gave up` | The frontend polled for its full two minutes and stopped ("The file check timed out"). |
 | `no answer` | Nothing conclusive within the budget. |
 
 Two separate budgets, which are easy to confuse:

@@ -14,9 +14,13 @@ import path from 'node:path'
 
 import {
   AUTH_PROVIDERS,
+  HELP,
   MAX_WINDOWS,
+  classifyMessage,
   parseArgs,
+  parseCols,
   parseCount,
+  parseNonNegative,
   parseScreen,
   readSizes,
   resolveUploadFile,
@@ -191,25 +195,24 @@ describe('parseArgs', () => {
   })
 
   test('every option named in --help is recognised', () => {
-    const flags = ['--headless', '--keep-open', '--manual-login', '--show-login']
-    for (const flag of flags) {
-      assert.equal(parseArgs([flag])[flag.replace(/^--/, '')], true, flag)
+    // Read from the help text itself, so an option added there without a
+    // parser entry (or the reverse) fails here instead of drifting silently.
+    // A `<placeholder>` after the name marks it as taking a value.
+    const options = [...HELP.matchAll(/^ {2}(--[a-z-]+)( <[^>]+>)?/gm)]
+    assert.ok(options.length > 10, 'the help text should list the options')
+    for (const [, opt, placeholder] of options) {
+      const key = opt.replace(/^--/, '')
+      if (placeholder) {
+        assert.equal(parseArgs([opt, '1'])[key], '1', opt)
+      } else {
+        assert.equal(parseArgs([opt])[key], true, opt)
+      }
     }
-    const values = {
-      '--url': 'http://x',
-      '--user': 'a@b.com',
-      '--password': 'pw',
-      '--auth': 'auto',
-      '--count': '2',
-      '--size': 'normal',
-      '--file': '/tmp/x.gpkg',
-      '--cols': '2',
-      '--screen': '800x600',
-      '--stagger': '10',
-      '--timeout': '1000'
-    }
-    for (const [opt, value] of Object.entries(values)) {
-      assert.equal(parseArgs([opt, value])[opt.replace(/^--/, '')], value, opt)
+  })
+
+  test('the options the help list is known to include', () => {
+    for (const opt of ['--share-session', '--linger', '--action-timeout']) {
+      assert.match(HELP, new RegExp(`^ {2}${opt}\\b`, 'm'), opt)
     }
   })
 })
@@ -254,5 +257,65 @@ describe('how long the windows stay up', () => {
     const args = parseArgs(['--keep-open', '--linger', '5'])
     assert.equal(args['keep-open'], true)
     assert.equal(args.linger, '5')
+  })
+})
+
+describe('numeric options refuse what is not a number', () => {
+  test('a missing value takes the default', () => {
+    assert.equal(parseNonNegative('--timeout', undefined, 150_000), 150_000)
+  })
+
+  test('zero and plain numbers are accepted', () => {
+    assert.equal(parseNonNegative('--linger', '0', 10), 0)
+    assert.equal(parseNonNegative('--stagger', '250', 0), 250)
+    assert.equal(parseNonNegative('--timeout', '1.5e5', 0), 150_000)
+  })
+
+  test('a unit, a negative or nothing at all is refused, naming the flag', () => {
+    for (const bad of ['150s', '10s', '-1', '', 'abc', 'Infinity']) {
+      assert.throws(
+        () => parseNonNegative('--timeout', bad, 0),
+        /--timeout must be a non-negative number/,
+        `for "${bad}"`
+      )
+    }
+  })
+
+  test('--cols is a positive integer or the default layout', () => {
+    assert.equal(parseCols(undefined), undefined)
+    assert.equal(parseCols('3'), 3)
+    for (const bad of ['0', '-2', '1.5', 'three', '']) {
+      assert.throws(() => parseCols(bad), /--cols must be a positive integer/)
+    }
+  })
+})
+
+describe('classifyMessage — what the upload form said', () => {
+  test('the busy message is busy, even though it says try again', () => {
+    assert.equal(
+      classifyMessage(
+        'The service is busy checking other files. Please try again in a few moments.'
+      ),
+      'busy'
+    )
+  })
+
+  test('the frontend giving up is gave up', () => {
+    assert.equal(
+      classifyMessage('The file check timed out. Please try again.'),
+      'gave up'
+    )
+  })
+
+  test('busy wins if a message ever says both', () => {
+    assert.equal(
+      classifyMessage('The service is busy and the file check timed out'),
+      'busy'
+    )
+  })
+
+  test('anything else is returned, for a person to read', () => {
+    assert.equal(classifyMessage('The selected file must be a .gpkg'), 'returned')
+    assert.equal(classifyMessage(''), 'returned')
   })
 })
