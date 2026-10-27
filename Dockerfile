@@ -1,3 +1,9 @@
+# Node comes from the official image, pinned to the patched release, not from
+# Alpine's `nodejs` package, whose version follows whichever Alpine release the
+# base image happens to be on. Keep in step with .nvmrc.
+ARG NODE_VERSION=24.22.1
+FROM node:${NODE_VERSION}-alpine AS node
+
 FROM defradigital/cdp-perf-test-docker:latest
 
 WORKDIR /opt/perftest
@@ -5,15 +11,21 @@ WORKDIR /opt/perftest
 # The base image (alpine/jmeter) ships no Node. entrypoint.sh mints a real
 # cdp-defra-id-stub token via scripts/get-stub-token.mjs before JMeter runs — the
 # DEFRA perf-test pattern (see trade-demo-perf-tests) — so add a Node runtime.
+# The musl build needs only libstdc++ and libgcc beside it.
 USER root
-RUN apk add --no-cache nodejs
+RUN apk add --no-cache libstdc++ libgcc
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && node --version
 
 # The default GeoPackage fixtures are committed (fixtures/), but any
 # non-default UPLOAD_SIZES entry is still generated at run time with
 # bng-library (scripts/make-gpkg.mjs), so its dependencies must be baked in.
 # npm and git are build-time only — git because bng-library is pinned to a
-# GitHub SHA rather than published to a registry — so they are installed as a
-# virtual package and removed once node_modules exists.
+# GitHub SHA rather than published to a registry. git is installed as a virtual
+# package and npm (copied from the Node image above) is deleted, both once
+# node_modules exists.
 #
 # --ignore-scripts is required, not belt-and-braces: npm runs a `prepare` step
 # for git dependencies, which installs bng-library's devDependencies and tries
@@ -30,9 +42,10 @@ RUN apk add --no-cache nodejs
 # concurrent-uploads.mjs). A JMeter task never drives a browser, and pulling a
 # browser driver into this image would be a large download for nothing.
 COPY package.json package-lock.json ./
-RUN apk add --no-cache --virtual .build-deps npm git \
+RUN apk add --no-cache --virtual .build-deps git \
     && npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
-    && apk del .build-deps
+    && apk del .build-deps \
+    && rm -rf /usr/local/bin/npm /usr/local/lib/node_modules/npm
 
 # scenarios/ carries three things the run needs: the plan itself, the generated
 # ladders.sh entrypoint.sh sources for its phase schedule, and the
