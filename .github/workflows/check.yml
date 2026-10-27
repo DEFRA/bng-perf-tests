@@ -23,10 +23,23 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v4
 
+      # The image pins Node in its Dockerfile ARG and CI pins it in .nvmrc.
+      # Fail if a version bump updates one and not the other, so CI never
+      # tests a different Node from the one that runs in CDP.
+      - name: Check the Dockerfile Node matches .nvmrc
+        run: |
+          nvmrc="$(tr -d 'v[:space:]' < .nvmrc)"
+          docker="$(sed -n 's/^ARG NODE_VERSION=//p' Dockerfile)"
+          if [ "$nvmrc" != "$docker" ]; then
+            echo "::error file=Dockerfile::ARG NODE_VERSION=$docker does not match .nvmrc ($nvmrc)"
+            exit 1
+          fi
+          echo "Node $nvmrc in both"
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
 
       # --ignore-scripts for the same reason the Dockerfile uses it: npm runs a
       # `prepare` step for the git-pinned bng-library, which tries to build

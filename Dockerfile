@@ -1,19 +1,15 @@
-FROM defradigital/cdp-perf-test-docker:latest
-
-WORKDIR /opt/perftest
-
-# The base image (alpine/jmeter) ships no Node. entrypoint.sh mints a real
-# cdp-defra-id-stub token via scripts/get-stub-token.mjs before JMeter runs — the
-# DEFRA perf-test pattern (see trade-demo-perf-tests) — so add a Node runtime.
-USER root
-RUN apk add --no-cache nodejs
+# Node comes from the official image, pinned to the patched release, not from
+# Alpine's `nodejs` package, whose version follows whichever Alpine release the
+# base image happens to be on. CI (check.yml) fails if this differs from .nvmrc.
+ARG NODE_VERSION=24.22.1
 
 # The default GeoPackage fixtures are committed (fixtures/), but any
 # non-default UPLOAD_SIZES entry is still generated at run time with
 # bng-library (scripts/make-gpkg.mjs), so its dependencies must be baked in.
-# npm and git are build-time only — git because bng-library is pinned to a
-# GitHub SHA rather than published to a registry — so they are installed as a
-# virtual package and removed once node_modules exists.
+# They are installed in this stage so npm and git — build-time only, git because
+# bng-library is pinned to a GitHub SHA rather than published to a registry —
+# never reach a layer of the shipped image. Both stages are musl, so
+# better-sqlite3's prebuilt binary matches.
 #
 # --ignore-scripts is required, not belt-and-braces: npm runs a `prepare` step
 # for git dependencies, which installs bng-library's devDependencies and tries
@@ -29,10 +25,27 @@ RUN apk add --no-cache nodejs
 # watch-a-burst tool developers run on their own machine (scripts/
 # concurrent-uploads.mjs). A JMeter task never drives a browser, and pulling a
 # browser driver into this image would be a large download for nothing.
+FROM node:${NODE_VERSION}-alpine AS deps
+WORKDIR /deps
+RUN apk add --no-cache git
 COPY package.json package-lock.json ./
-RUN apk add --no-cache --virtual .build-deps npm git \
-    && npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
-    && apk del .build-deps
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
+FROM defradigital/cdp-perf-test-docker:latest
+
+WORKDIR /opt/perftest
+
+# The base image (alpine/jmeter) ships no Node. entrypoint.sh mints a real
+# cdp-defra-id-stub token via scripts/get-stub-token.mjs before JMeter runs — the
+# DEFRA perf-test pattern (see trade-demo-perf-tests) — so add a Node runtime:
+# the binary alone, which the musl build needs only libstdc++ and libgcc beside.
+USER root
+RUN apk add --no-cache libstdc++ libgcc
+COPY --from=deps /usr/local/bin/node /usr/local/bin/node
+RUN node --version
+
+COPY package.json package-lock.json ./
+COPY --from=deps /deps/node_modules ./node_modules
 
 # scenarios/ carries three things the run needs: the plan itself, the generated
 # ladders.sh entrypoint.sh sources for its phase schedule, and the

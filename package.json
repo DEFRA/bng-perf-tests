@@ -6,7 +6,7 @@
   "description": "JMeter performance-test suite for the BNG Metric service, run from the CDP Portal.",
   "license": "OGL-UK-3.0",
   "engines": {
-    "node": ">=22.11"
+    "node": ">=24.22.1"
   },
   "scripts": {
     "gpkg": "node scripts/make-gpkg.mjs",
