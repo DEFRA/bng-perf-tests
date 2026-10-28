@@ -7,9 +7,120 @@
  * before any of that, whether a phase gets a pool at all.
  */
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { test, describe } from 'node:test'
 
-import { editableHabitats, parsePreparedSizes } from '../scripts/stage-uploads.mjs'
+import {
+  editableHabitats,
+  formatMismatchMessage,
+  manifestEntry,
+  parsePreparedSizes,
+  parseUploadTemplate,
+  validateEndpointFor
+} from '../scripts/stage-uploads.mjs'
+
+const MANIFEST = JSON.parse(
+  readFileSync(join(import.meta.dirname, '..', 'fixtures', 'manifest.json'))
+)
+
+describe('parseUploadTemplate', () => {
+  test('defaults to the legacy template, so an existing run is unchanged', () => {
+    // entrypoint.sh passes UPLOAD_TEMPLATE whether or not it was set.
+    assert.equal(parseUploadTemplate(undefined), 'legacy')
+    assert.equal(parseUploadTemplate(''), 'legacy')
+  })
+
+  test('reads either template, whatever the case', () => {
+    assert.equal(parseUploadTemplate('legacy'), 'legacy')
+    assert.equal(parseUploadTemplate(' Service '), 'service')
+  })
+
+  test('rejects anything else loudly', () => {
+    // A mistyped value would stage the wrong file and have every validate
+    // refused at the format gate.
+    assert.throws(() => parseUploadTemplate('bng-service'), /UPLOAD_TEMPLATE/)
+    assert.throws(() => parseUploadTemplate('true'), /UPLOAD_TEMPLATE/)
+  })
+})
+
+describe('manifestEntry', () => {
+  test('the committed manifest has all four sizes in both templates', () => {
+    for (const template of ['legacy', 'service']) {
+      for (const [label, parcels] of [
+        ['normal', 80],
+        ['medium', 800],
+        ['large', 5000],
+        ['xlarge', 12000]
+      ]) {
+        const entry = manifestEntry(MANIFEST, { template, label, parcels })
+        assert.ok(entry, `${template} ${label} is in fixtures/manifest.json`)
+        assert.match(
+          entry.file,
+          new RegExp(`^${template === 'service' ? 'template' : 'baseline'}-${label}\\.gpkg$`)
+        )
+      }
+    }
+  })
+
+  test('never hands one template the other template’s file', () => {
+    const manifest = {
+      sizes: [{ template: 'legacy', label: 'normal', parcels: 80, file: 'baseline-normal.gpkg' }]
+    }
+    assert.equal(
+      manifestEntry(manifest, { template: 'service', label: 'normal', parcels: 80 }),
+      null
+    )
+  })
+
+  test('an entry without a template is legacy, as every entry was before', () => {
+    const manifest = { sizes: [{ label: 'normal', parcels: 80, file: 'baseline-normal.gpkg' }] }
+    assert.ok(manifestEntry(manifest, { template: 'legacy', label: 'normal', parcels: 80 }))
+    assert.equal(
+      manifestEntry(manifest, { template: 'service', label: 'normal', parcels: 80 }),
+      null
+    )
+  })
+
+  test('a changed parcel count falls back to generating', () => {
+    assert.equal(
+      manifestEntry(MANIFEST, { template: 'service', label: 'normal', parcels: 81 }),
+      null
+    )
+  })
+})
+
+describe('validateEndpointFor', () => {
+  test('a template file loads through the single-file upload endpoint', () => {
+    // The post-intervention endpoint stores both of a template file's stages.
+    assert.equal(validateEndpointFor('service'), '/post-intervention/validate')
+    assert.equal(validateEndpointFor('legacy'), '/baseline/validate')
+  })
+})
+
+describe('formatMismatchMessage', () => {
+  test('a pass is not a mismatch', () => {
+    assert.equal(formatMismatchMessage('service', { valid: true, errors: [] }), null)
+  })
+
+  test('a refused template upload names the flag value the run needs', () => {
+    const message = formatMismatchMessage('service', {
+      valid: false,
+      errors: [{ code: 'GPKG_MISSING_LAYER' }, { code: 'GPKG_MISSING_LAYER' }]
+    })
+    assert.match(message, /GPKG_MISSING_LAYER\)/)
+    assert.match(message, /SERVICE_TEMPLATE_ENABLED=true/)
+  })
+
+  test('a refused legacy upload names the flag value the run needs', () => {
+    const message = formatMismatchMessage('legacy', {
+      valid: false,
+      errors: [{ code: 'LEGACY_TEMPLATE_NOT_ACCEPTED' }]
+    })
+    assert.match(message, /LEGACY_TEMPLATE_NOT_ACCEPTED/)
+    assert.match(message, /SERVICE_TEMPLATE_ENABLED=false/)
+  })
+})
 
 describe('parsePreparedSizes', () => {
   test('reads label:count pairs', () => {

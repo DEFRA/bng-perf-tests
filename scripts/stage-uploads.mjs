@@ -22,11 +22,53 @@
  * progress, failures) goes to stderr, which is the run log rather than the
  * property channel. Plus a projects CSV written to disk for JMeter's CSV Data
  * Set.
+ *
+ * UPLOAD_TEMPLATE picks which upload template the run stages, and must match
+ * the target service's SERVICE_TEMPLATE_ENABLED flag:
+ *   legacy   (default) the Natural England baseline, plus a generated
+ *            post-intervention file paired with it — for scenarios/bng-perf.jmx
+ *            against a service with the flag off
+ *   service  the BNG Service template: ONE file per size holding both stages,
+ *            staged once and used as both uploadId_<label> and
+ *            piUploadId_<label> — for scenarios/bng-perf-template.jmx against a
+ *            service with the flag on. Goes when the legacy template is
+ *            decommissioned (BMD-1097), and with it the legacy branch.
  */
 import { writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { makeGeoPackage, makeGeoPackagePair } from './make-gpkg.mjs'
+import {
+  makeGeoPackage,
+  makeGeoPackagePair,
+  makeTemplateGeoPackage
+} from './make-gpkg.mjs'
+
+export const LEGACY_TEMPLATE = 'legacy'
+export const SERVICE_TEMPLATE = 'service'
+
+/** The plan each upload template is staged for, named in errors. */
+export const PLAN_FOR_TEMPLATE = Object.freeze({
+  [LEGACY_TEMPLATE]: 'scenarios/bng-perf.jmx',
+  [SERVICE_TEMPLATE]: 'scenarios/bng-perf-template.jmx'
+})
+
+/**
+ * Parse UPLOAD_TEMPLATE. Loud on an unknown value: staging the wrong template
+ * would have every validate in the run refused at the format gate, which reads
+ * in the report as a service failing rather than a mistyped setting.
+ *
+ * @param {string | undefined} value
+ * @returns {'legacy' | 'service'}
+ */
+export function parseUploadTemplate(value) {
+  const template = String(value || LEGACY_TEMPLATE).trim().toLowerCase()
+  if (!(template in PLAN_FOR_TEMPLATE)) {
+    throw new Error(
+      `UPLOAD_TEMPLATE must be one of ${Object.keys(PLAN_FOR_TEMPLATE).join(', ')} (got: ${value})`
+    )
+  }
+  return template
+}
 
 const API_BASE_URL = process.env.API_BASE_URL
 const BEARER_TOKEN = process.env.BEARER_TOKEN
@@ -99,7 +141,8 @@ const DEFAULT_SIZES = 'normal:80,medium:800,large:5000,xlarge:12000'
 /**
  * The size labels the JMeter plan is wired to.
  *
- * `scenarios/bng-perf.jmx` reads `uploadId_normal` / `_medium` / `_large` /
+ * Both plans (`scenarios/bng-perf.jmx`, `scenarios/bng-perf-template.jmx`)
+ * read `uploadId_normal` / `_medium` / `_large` /
  * `_xlarge` by name, one hard-coded sampler each, and every concurrency phase
  * reads `uploadId_large`. So UPLOAD_SIZES sets how big each step is — that is
  * what it is for — but not what the steps are called. A label the plan does not
@@ -142,7 +185,7 @@ function parseSizes(spec) {
 }
 
 /** Reject a size spec the plan cannot consume, naming the fix. */
-function assertPlanLabels(sizes) {
+function assertPlanLabels(sizes, template) {
   const got = sizes.map((s) => s.label)
   const missing = PLAN_SIZE_LABELS.filter((label) => !got.includes(label))
   const unknown = got.filter((label) => !PLAN_SIZE_LABELS.includes(label))
@@ -156,7 +199,7 @@ function assertPlanLabels(sizes) {
     .filter(Boolean)
     .join('; ')
   throw new Error(
-    `UPLOAD_SIZES must name exactly the labels scenarios/bng-perf.jmx reads ` +
+    `UPLOAD_SIZES must name exactly the labels ${PLAN_FOR_TEMPLATE[template]} reads ` +
       `(${PLAN_SIZE_LABELS.join(', ')}) — ${detail}. Change the parcel counts, not the labels.`
   )
 }
@@ -257,26 +300,40 @@ async function waitForReady(uploadId) {
 }
 
 /**
- * The committed fixture for a size, when there is one. fixtures/manifest.json
- * (written by gen-fixtures.mjs) is matched on label AND parcel count, so a
- * UPLOAD_SIZES override that changes a count simply falls back to generating —
- * the fast path never uploads a file of the wrong size under the right name.
+ * The manifest entry for a size, when there is one. fixtures/manifest.json
+ * (written by gen-fixtures.mjs) is matched on template, label AND parcel
+ * count, so a UPLOAD_SIZES override that changes a count simply falls back to
+ * generating — the fast path never uploads a file of the wrong size, or the
+ * wrong template, under the right name. An entry with no `template` predates
+ * the BNG Service set and is legacy.
+ *
+ * @param {{ sizes?: object[] } | null | undefined} manifest
+ * @param {{ template: string, label: string, parcels: number }} size
  */
-function committedFixture({ label, parcels }) {
+export function manifestEntry(manifest, { template, label, parcels }) {
+  return (
+    manifest?.sizes?.find(
+      (s) =>
+        (s.template ?? LEGACY_TEMPLATE) === template &&
+        s.label === label &&
+        s.parcels === parcels
+    ) ?? null
+  )
+}
+
+function committedFixture(size) {
   let manifest
   try {
     manifest = JSON.parse(readFileSync(join(FIXTURES_DIR, 'manifest.json')))
   } catch {
     return null
   }
-  const entry = manifest.sizes?.find(
-    (s) => s.label === label && s.parcels === parcels
-  )
+  const entry = manifestEntry(manifest, size)
   return entry ? { path: join(FIXTURES_DIR, entry.file), bytes: entry.bytes } : null
 }
 
-async function stageOneSize({ label, parcels }) {
-  const fixture = committedFixture({ label, parcels })
+async function stageOneSize({ template, label, parcels }) {
+  const fixture = committedFixture({ template, label, parcels })
   let filePath
   let bytes
   if (fixture) {
@@ -286,9 +343,12 @@ async function stageOneSize({ label, parcels }) {
         `(committed fixture) — uploading\n`
     )
   } else {
-    filePath = join(STAGE_DIR, `baseline-${label}.gpkg`)
+    const service = template === SERVICE_TEMPLATE
+    filePath = join(STAGE_DIR, `${service ? 'template' : 'baseline'}-${label}.gpkg`)
     let generationMs
-    ;({ bytes, generationMs } = makeGeoPackage(filePath, parcels))
+    ;({ bytes, generationMs } = (
+      service ? makeTemplateGeoPackage : makeGeoPackage
+    )(filePath, parcels))
     // Generation time is logged because it is super-linear in parcel count and
     // is pure setup cost — a task that looks slow to start is usually the top
     // of the size ramp being built, not the service being slow.
@@ -402,23 +462,28 @@ function writeCsv(path, rows) {
  * from S3 each time. Uploading N copies would multiply the slowest part of
  * staging by N for no difference in the resulting documents.
  *
+ * A BNG Service template file goes in through the post-intervention endpoint,
+ * the user's single-file upload, so each prepared project holds both stages —
+ * a baseline to edit and fetch, and the post-intervention document a real
+ * template project has. The legacy baseline goes in through its own endpoint.
+ *
  * Sequential, like the rest of staging: this is setup, and running it
  * concurrently would put the burst we are about to measure onto the service
  * before the measurement starts.
  */
-async function preparePool({ label, count, uploadId }) {
+async function preparePool({ template, label, count, uploadId }) {
+  const endpoint = validateEndpointFor(template)
   const projects = []
   for (let i = 0; i < count; i++) {
     const created = await postJson(`${API_BASE_URL}/projects/new`, {
       project: { name: `perf ${label} prepared ${i + 1}` }
     })
-    const result = await postJson(
-      `${API_BASE_URL}/baseline/validate/${uploadId}`,
-      { projectId: created.id }
-    )
+    const result = await postJson(`${API_BASE_URL}${endpoint}/${uploadId}`, {
+      projectId: created.id
+    })
     if (!result?.valid) {
       throw new Error(
-        `baseline did not validate into ${created.id}: ${JSON.stringify(result).slice(0, 300)}`
+        `${label} did not validate into ${created.id} via ${endpoint}: ${JSON.stringify(result).slice(0, 300)}`
       )
     }
     projects.push(created.id)
@@ -495,6 +560,70 @@ async function stagePostIntervention({ label, parcels }) {
 }
 
 /**
+ * The endpoint that loads a whole upload into a project: the baseline one for
+ * a legacy baseline, the post-intervention one for a BNG Service template file
+ * (which stores both of its stages from there).
+ *
+ * @param {string} template
+ */
+export function validateEndpointFor(template) {
+  return template === SERVICE_TEMPLATE
+    ? '/post-intervention/validate'
+    : '/baseline/validate'
+}
+
+/**
+ * Explain a preflight validate the format gate refused, naming the likely fix.
+ *
+ * Neither template is accepted by a service set for the other, and nothing
+ * auto-detects the format: the flag alone decides. So an upload refused at the
+ * gate almost always means the run's UPLOAD_TEMPLATE does not match the target
+ * backend's SERVICE_TEMPLATE_ENABLED — and every validate in the plan would be
+ * refused the same way. Null when the result is a pass.
+ *
+ * @param {string} template the run's UPLOAD_TEMPLATE
+ * @param {{ valid?: boolean, errors?: { code?: string }[] } | null} result
+ * @returns {string | null}
+ */
+export function formatMismatchMessage(template, result) {
+  if (result?.valid) {
+    return null
+  }
+  const codes = [
+    ...new Set((result?.errors ?? []).map((e) => e?.code).filter(Boolean))
+  ]
+  const expected = template === SERVICE_TEMPLATE ? 'true' : 'false'
+  return (
+    `the staged ${template} upload did not validate (${codes.join(', ') || 'no error code'}). ` +
+    `A ${template} run needs the target backend's SERVICE_TEMPLATE_ENABLED=${expected}; ` +
+    `check the flag on the environment, or set UPLOAD_TEMPLATE to match it.`
+  )
+}
+
+/**
+ * Validate the first staged upload once, without a project, before anything
+ * is built on it. Cheap — it is the smallest size — and it is the one check
+ * that catches the run and the service disagreeing about the template, which
+ * would otherwise surface as a plan full of refused validates.
+ */
+async function preflightTemplate(template, { label, uploadId }) {
+  const endpoint = validateEndpointFor(template)
+  let result
+  try {
+    result = await postJson(`${API_BASE_URL}${endpoint}/${uploadId}`, {})
+  } catch (err) {
+    throw new Error(`preflight ${endpoint} of ${label} failed: ${err.message}`)
+  }
+  const mismatch = formatMismatchMessage(template, result)
+  if (mismatch) {
+    throw new Error(`${mismatch} (${JSON.stringify(result).slice(0, 300)})`)
+  }
+  process.stderr.write(
+    `▸ preflight: ${label} ${template} upload validates via ${endpoint}\n`
+  )
+}
+
+/**
  * Top up the owner's projects to a pool big enough that concurrent threads get
  * their own. Never deletes, so re-running a task does not pile rows up beyond
  * the target.
@@ -527,8 +656,14 @@ async function main() {
   }
   mkdirSync(STAGE_DIR, { recursive: true })
 
-  const sizes = parseSizes(process.env.UPLOAD_SIZES || DEFAULT_SIZES)
-  assertPlanLabels(sizes)
+  const template = parseUploadTemplate(process.env.UPLOAD_TEMPLATE)
+  process.stderr.write(
+    `▸ upload template: ${template} (for ${PLAN_FOR_TEMPLATE[template]})\n`
+  )
+  const sizes = parseSizes(process.env.UPLOAD_SIZES || DEFAULT_SIZES).map(
+    (size) => ({ ...size, template })
+  )
+  assertPlanLabels(sizes, template)
 
   // Fatal on its own: every phase in the plan reads its projectId from this
   // CSV, so there is no partial run to salvage without it.
@@ -561,6 +696,9 @@ async function main() {
       `no size staged (${failed.join(', ')}) — there is no upload load to run`
     )
   }
+  // Fatal, unlike a size that did not stage: a template the service refuses
+  // fails every phase, so there is nothing worth running.
+  await preflightTemplate(template, staged[0])
   if (failed.length > 0) {
     process.stderr.write(
       `▸ WARNING: ${failed.length} of ${sizes.length} size(s) did not stage: ${failed.join(', ')}.\n` +
@@ -605,9 +743,10 @@ async function stagePreparedPools(staged) {
     }
     try {
       process.stderr.write(
-        `▸ preparing ${count} ${label} project(s) — validating the staged baseline into each\n`
+        `▸ preparing ${count} ${label} project(s) — validating the staged upload into each\n`
       )
       const projectIds = await preparePool({
+        template: size.template,
         label,
         count,
         uploadId: size.uploadId
@@ -638,7 +777,12 @@ async function stagePreparedPools(staged) {
       continue
     }
 
-    if (piWanted.has(label)) {
+    if (piWanted.has(label) && size.template === SERVICE_TEMPLATE) {
+      // The template file already holds the post-intervention stage, so the
+      // upload staged for the size IS the post-intervention upload: one file,
+      // one scan, both endpoints.
+      process.stdout.write(`piUploadId_${label}=${size.uploadId}\n`)
+    } else if (piWanted.has(label)) {
       try {
         const uploadId = await stagePostIntervention({
           label,

@@ -21,8 +21,15 @@
  * remains the generator behind them, and the run-time fallback for any other
  * size asked for via UPLOAD_SIZES.
  */
-import { rmSync, statSync } from 'node:fs'
-import { generateOne, deriveBaselineFromSynthetic, setMode } from 'bng-library'
+import { rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  FORMAT_BNG_SERVICE,
+  STAGE_POST_INTERVENTION,
+  deriveBaselineFromSynthetic,
+  generateOne,
+  generateSyntheticGpkg,
+  setMode
+} from 'bng-library'
 
 // The library defaults to its CLI logger, which prints a generation banner to
 // *stdout*. stage-uploads.mjs emits `uploadId_<label>=<uuid>` lines on stdout
@@ -113,11 +120,58 @@ export function makeGeoPackagePair(baselinePath, piPath, parcels, { seed } = {})
   }
 }
 
-// CLI: node scripts/make-gpkg.mjs <parcels> <outFile>
+/**
+ * Write a BNG Service template GeoPackage with `parcels` habitat parcels to
+ * `filePath`: ONE file holding both the Baseline and the Post-Intervention
+ * tables, the file a user uploads once the service-template flag is on.
+ *
+ * It is the same site the legacy generator draws for the same parcel count
+ * and seed — bng-library builds both formats from one draw — so the two plans
+ * compare like with like. The template's own additions (vertical habitats,
+ * comments, Enhanced trees, habitats that get worse) are kept, because a real
+ * template file carries them; the irreplaceable parcel and tree are not,
+ * because the service refuses an irreplaceable habitat at upload and a file
+ * refused there measures nothing.
+ *
+ * The same file serves both endpoints: /baseline/validate reads only its
+ * Baseline tables, /post-intervention/validate validates both stages and the
+ * lineage between them, so there is no pair to keep in step.
+ *
+ * @param {string} filePath where to write the file
+ * @param {number} parcels how many habitat parcels it should contain
+ * @param {{ seed?: number }} [options]
+ * @returns {{ path: string, parcels: number, bytes: number, generationMs: number }}
+ */
+export function makeTemplateGeoPackage(filePath, parcels, { seed } = {}) {
+  const startedAt = process.hrtime.bigint()
+  const { buffer } = generateSyntheticGpkg({
+    format: FORMAT_BNG_SERVICE,
+    stage: STAGE_POST_INTERVENTION,
+    numParcels: parcels,
+    numTrees: NO_TREES,
+    centre: SITE_CENTRE,
+    seed: seed ?? parcels,
+    irreplaceableLayers: []
+  })
+  writeFileSync(filePath, buffer)
+  const generationMs = Math.round(
+    Number(process.hrtime.bigint() - startedAt) / 1e6
+  )
+  return { path: filePath, parcels, bytes: buffer.length, generationMs }
+}
+
+// CLI: node scripts/make-gpkg.mjs <parcels> <outFile> [--template]
 if (process.argv[1]?.endsWith('make-gpkg.mjs')) {
-  const parcels = Number(process.argv[2] ?? 100)
-  const out = process.argv[3] ?? `baseline-${parcels}.gpkg`
-  const result = makeGeoPackage(out, parcels)
+  const template = process.argv.includes('--template')
+  const [parcelsArg, outArg] = process.argv
+    .slice(2)
+    .filter((a) => a !== '--template')
+  const parcels = Number(parcelsArg ?? 100)
+  const out =
+    outArg ?? `${template ? 'template' : 'baseline'}-${parcels}.gpkg`
+  const result = template
+    ? makeTemplateGeoPackage(out, parcels)
+    : makeGeoPackage(out, parcels)
   console.log(
     `${result.path}: ${result.parcels} parcels, ` +
       `${(result.bytes / 1024).toFixed(0)} KB, ${result.generationMs} ms`

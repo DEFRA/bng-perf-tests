@@ -697,6 +697,13 @@ function main() {
   out.push(
     `  ${samples.length} samples over ${((Math.max(...samples.map((s) => s.ts + s.elapsed)) - Math.min(...samples.map((s) => s.ts))) / MS_PER_SECOND / 60).toFixed(1)} minutes`
   )
+  // Stated because the two templates' rows share every label: without it, a
+  // pasted summary does not say which template its numbers are for.
+  if (process.env.UPLOAD_TEMPLATE) {
+    out.push(
+      `  upload template: ${process.env.UPLOAD_TEMPLATE === 'service' ? 'BNG Service template (service)' : 'legacy'}`
+    )
+  }
 
   const journeyEndToEnd = journeyTotals(samples)
   if (journeyEndToEnd.length > 0) {

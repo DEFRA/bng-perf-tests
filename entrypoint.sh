@@ -258,6 +258,39 @@ if [ ! -f "${JM_SCENARIOS}/${SCENARIO}.jmx" ]; then
   echo "         suite at the '${PERF_PROFILE}' profile. If you meant a profile, check the spelling." >&2
   SCENARIO=bng-perf
 fi
+
+# ── Which upload template the run uploads ───────────────────────────────────
+# legacy  — the per-stage legacy GeoPackages (fixtures/baseline-<size>.gpkg),
+#           against a service with SERVICE_TEMPLATE_ENABLED=false. The default.
+# service — the BNG Service template, both stages in one file
+#           (fixtures/template-<size>.gpkg), against SERVICE_TEMPLATE_ENABLED=true.
+#           Runs scenarios/bng-perf-template.jmx, the same suite generated for
+#           the template, so its rows compare with a legacy run's one for one.
+#
+# The service's flag decides which template it accepts and this cannot read it,
+# so a mismatch is caught at staging: stage-uploads.mjs validates one upload
+# first and fails the run, naming the flag, rather than measuring rejections.
+# An unknown value fails too — a run that silently fell back to the other
+# template would be exactly that mismatch.
+UPLOAD_TEMPLATE=$(printf '%s' "${UPLOAD_TEMPLATE:-legacy}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+case "${UPLOAD_TEMPLATE}" in
+  legacy)
+    FIXTURE_PREFIX=baseline
+    TEMPLATE_FLAG_REQUIRED="SERVICE_TEMPLATE_ENABLED=false"
+    ;;
+  service)
+    FIXTURE_PREFIX=template
+    TEMPLATE_FLAG_REQUIRED="SERVICE_TEMPLATE_ENABLED=true"
+    if [ "${SCENARIO}" = "bng-perf" ]; then
+      SCENARIO=bng-perf-template
+    fi
+    echo "▸ upload template: service — running bng-perf-template.jmx; the target must have ${TEMPLATE_FLAG_REQUIRED}"
+    ;;
+  *)
+    echo "ERROR: UPLOAD_TEMPLATE='${UPLOAD_TEMPLATE}' is not an upload template — use legacy or service." >&2
+    exit 1
+    ;;
+esac
 SCENARIOFILE=${JM_SCENARIOS}/${SCENARIO}.jmx
 
 # Read a generated per-profile value. The keys come from ladders.sh, which this
@@ -615,6 +648,7 @@ echo "────────────────────────�
 echo "  run_id:              ${RUN_ID:-<unset>}"
 echo "  environment:         ${ENVIRONMENT:-<unset>}"
 echo "  scenario:            ${SCENARIO}"
+echo "  upload template:     ${UPLOAD_TEMPLATE} (fixtures/${FIXTURE_PREFIX}-<size>.gpkg; target must have ${TEMPLATE_FLAG_REQUIRED})"
 echo "  frontend target:     ${SERVICE_URL_SCHEME}://${FRONTEND_DOMAIN}:${FRONTEND_PORT}"
 echo "  backend target:      ${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${BACKEND_PORT}"
 echo "  stub base URL:       ${STUB_BASE_URL}"
@@ -769,6 +803,7 @@ stage_uploads() {
   PREPARED_SIZES="${PREPARED_SIZES}" \
   PI_SIZES="${PI_SIZES}" \
   CONTENTION_FEATURES="${CONTENTION_FEATURES}" \
+  UPLOAD_TEMPLATE="${UPLOAD_TEMPLATE}" \
     node --no-warnings "${JM_HOME}/scripts/stage-uploads.mjs" > "${STAGE_OUT}"
   STAGE_STATUS=$?
   set -x
@@ -878,7 +913,7 @@ disable_unstaged_phases() {
     # The journey uploads its own file every iteration, so what it needs is the
     # committed fixture on disk rather than anything staged.
     eval "journey_file=\${JOURNEY_FILE_$(printf '%s' "${upload_label}" | tr '[:lower:]' '[:upper:]')}"
-    journey_file=${journey_file:-${JM_HOME}/fixtures/baseline-${upload_label}.gpkg}
+    journey_file=${journey_file:-${JM_HOME}/fixtures/${FIXTURE_PREFIX}-${upload_label}.gpkg}
     if [ ! -f "${journey_file}" ]; then
       echo "▸ no fixture at ${journey_file} — skipping the '${upload_label}' journey ladder" >&2
       disable_phases_matching "journey_${upload_label}_"
@@ -1152,6 +1187,7 @@ if [ -f "${REPORTFILE}" ]; then
   SIZE_RAMP_EXPECTED="${SIZE_RAMP_EXPECTED}" \
   SIZE_RAMP_WINDOW_SECONDS="${SIZE_RAMP_DURATION_SECONDS}" \
   PERF_PROFILE="${PERF_PROFILE}" \
+  UPLOAD_TEMPLATE="${UPLOAD_TEMPLATE}" \
     node "${JM_HOME}/scripts/summarise-run.mjs" "${REPORTFILE}" || \
     echo "WARNING: could not summarise ${REPORTFILE}" >&2
   set -x

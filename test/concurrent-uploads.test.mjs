@@ -16,6 +16,7 @@ import {
   AUTH_PROVIDERS,
   HELP,
   MAX_WINDOWS,
+  UPLOAD_PAGES,
   classifyMessage,
   parseArgs,
   parseCols,
@@ -24,6 +25,7 @@ import {
   parseScreen,
   readSizes,
   resolveUploadFile,
+  templateOf,
   tile
 } from '../scripts/concurrent-uploads.mjs'
 
@@ -137,11 +139,44 @@ describe('resolveUploadFile — which GeoPackage gets sent', () => {
     assert.match(file, /baseline-large\.gpkg$/)
   })
 
-  test('every label in the manifest resolves to a fixture', async () => {
-    for (const { label, file } of await readSizes()) {
-      const resolved = await resolveUploadFile({ size: label })
-      assert.equal(path.basename(resolved), file)
+  test('every label in the manifest resolves to a fixture, per template', async () => {
+    for (const template of ['legacy', 'service']) {
+      const sizes = await readSizes(template)
+      assert.deepEqual(
+        sizes.map((entry) => entry.label),
+        ['normal', 'medium', 'large', 'xlarge']
+      )
+      for (const { label, file } of sizes) {
+        const resolved = await resolveUploadFile({ size: label, template })
+        assert.equal(path.basename(resolved), file)
+      }
     }
+  })
+
+  test('--template picks the template fixture and the post-intervention page', async () => {
+    const args = parseArgs(['--template', '--size', 'normal'])
+    const template = templateOf(args)
+    assert.equal(template, 'service')
+    assert.equal(UPLOAD_PAGES[template], 'upload-post-intervention-file')
+    const resolved = await resolveUploadFile({ ...args, template })
+    assert.match(resolved, /template-normal\.gpkg$/)
+  })
+
+  test('without --template it is the legacy baseline, as before', async () => {
+    const template = templateOf(parseArgs(['--size', 'normal']))
+    assert.equal(template, 'legacy')
+    assert.equal(UPLOAD_PAGES[template], 'upload-baseline-file')
+    assert.match(
+      await resolveUploadFile({ size: 'normal', template }),
+      /baseline-normal\.gpkg$/
+    )
+  })
+
+  test('the help names the sizes the manifest actually has', async () => {
+    for (const { label } of await readSizes()) {
+      assert.match(HELP, new RegExp(`\\b${label}\\b`))
+    }
+    assert.doesNotMatch(HELP, /\bbusy \(800\)/)
   })
 
   test('xlarge is the 12,000-parcel file the burst is usually about', async () => {

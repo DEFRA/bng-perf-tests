@@ -726,3 +726,48 @@ describe('the committed plan', () => {
     }
   })
 })
+
+/**
+ * The BNG Service template plan. check-scenario already proves it is exactly
+ * what the generator makes of bng-perf.jmx; these pin what that has to MEAN,
+ * so a change to the generator cannot quietly turn it back into a legacy run.
+ */
+describe('the template plan', () => {
+  const read = (name) => readFileSync(join(ROOT, 'scenarios', name), 'utf8')
+  const legacy = read('bng-perf.jmx')
+  const template = read('bng-perf-template.jmx')
+  const testnames = (jmx) =>
+    [...jmx.matchAll(/<(HTTPSamplerProxy|ThreadGroup|TransactionController)[^>]*testname="([^"]*)"/g)].map(
+      (m) => `${m[1]} ${m[2]}`
+    )
+  const samplerPaths = (jmx) =>
+    [...jmx.matchAll(/<stringProp name="HTTPSampler.path">([^<]*)<\/stringProp>/g)].map((m) => m[1])
+
+  test('has the same thread groups and samplers, by name, as the legacy plan', () => {
+    // summarise-run.mjs and every run anyone compares against key on these
+    // labels: a template run is only comparable with a legacy one row for row
+    // if the two plans name everything the same.
+    assert.deepEqual(testnames(template), testnames(legacy))
+  })
+
+  test('validates the upload journey through the post-intervention endpoint', () => {
+    const paths = samplerPaths(template)
+    assert.ok(paths.includes('/post-intervention/validate/${journeyUploadId}'))
+    assert.ok(!paths.includes('/baseline/validate/${journeyUploadId}'))
+  })
+
+  test('leaves every other validate on the endpoint the legacy plan uses', () => {
+    const notJourney = (jmx) => samplerPaths(jmx).filter((p) => !p.includes('${journeyUploadId}'))
+    assert.deepEqual(notJourney(template), notJourney(legacy))
+  })
+
+  test('falls back to the template fixtures, never the legacy ones', () => {
+    assert.doesNotMatch(template, /fixtures\/baseline-\w+\.gpkg/)
+    for (const size of SIZE_LABELS) {
+      assert.ok(
+        template.includes(`fixtures/template-${size}.gpkg`),
+        `the template plan has no template-${size}.gpkg fallback`
+      )
+    }
+  })
+})
