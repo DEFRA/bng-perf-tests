@@ -160,6 +160,31 @@ const PLAN_SIZE_LABELS = ['normal', 'medium', 'large', 'xlarge']
  */
 const LABEL_PATTERN = /^[a-z][a-z0-9_]*$/
 
+/** `count` indexes, `0 .. count - 1`. */
+function steps(count) {
+  return Array.from({ length: count }, (_, index) => index)
+}
+
+/**
+ * Yield `items` one at a time, for `for await`.
+ *
+ * Every await in this file's loops is sequential on purpose: staging is setup,
+ * and running those requests together would be the burst the run exists to
+ * measure, taken before the measurement starts.
+ */
+async function* sequentially(items) {
+  for (const item of items) {
+    yield item
+  }
+}
+
+/** One timestamp per check, until `deadlineMs`. A poll waits between checks. */
+async function* until(deadlineMs) {
+  while (Date.now() < deadlineMs) {
+    yield Date.now()
+  }
+}
+
 function parseSizes(spec) {
   return spec
     .split(',')
@@ -279,7 +304,7 @@ async function postFileToUploader(uploadUrl, filePath, bytes) {
 async function waitForReady(uploadId) {
   const deadline = Date.now() + UPLOAD_READY_TIMEOUT_MS
   let last
-  while (Date.now() < deadline) {
+  for await (const now of until(deadline)) {
     last = await getJson(`${API_BASE_URL}/upload/${uploadId}/status`)
     if (last?.uploadStatus === 'ready') {
       if (last.numberOfRejectedFiles > 0) {
@@ -292,11 +317,67 @@ async function waitForReady(uploadId) {
     if (last?.uploadStatus === 'rejected') {
       throw new Error(`upload ${uploadId} rejected: ${JSON.stringify(last).slice(0, 300)}`)
     }
-    await new Promise((r) => setTimeout(r, UPLOAD_POLL_INTERVAL_MS))
+    const remaining = deadline - now
+    if (remaining <= 0) {
+      break
+    }
+    await new Promise((r) =>
+      setTimeout(r, Math.min(UPLOAD_POLL_INTERVAL_MS, remaining))
+    )
   }
   throw new Error(
     `upload ${uploadId} never became ready within ${UPLOAD_READY_TIMEOUT_MS}ms (last: ${JSON.stringify(last)})`
   )
+}
+
+/**
+ * An error message with its `cause`. Node's fetch reports every network
+ * failure as a bare "fetch failed" and keeps the reason (a reset socket, a
+ * refused connection) on `cause`, so without it the log cannot say which.
+ */
+export function describeError(err) {
+  const cause = err?.cause
+  if (!cause) {
+    return err?.message ?? String(err)
+  }
+  const detail = [cause.code, cause.message].filter(Boolean).join(' ')
+  return `${err.message} (${detail || String(cause)})`
+}
+
+/**
+ * True for a fetch that never got a response, as opposed to one the service
+ * answered with an error status — only the first is worth retrying.
+ */
+export function isNetworkError(err) {
+  return err instanceof TypeError && err.message === 'fetch failed'
+}
+
+/**
+ * Initiate, upload and wait for the scan, retrying once on a network error.
+ *
+ * Generating a large file blocks the event loop for seconds, long enough for
+ * the server to close fetch's idle keep-alive socket without fetch noticing;
+ * the next request then goes out on the dead socket and fails. A second
+ * attempt opens a fresh connection. Each attempt initiates its own upload, so
+ * a half-finished first attempt cannot leak into the second.
+ */
+async function uploadAndWait(filePath, bytes) {
+  try {
+    return await uploadOnce(filePath, bytes)
+  } catch (err) {
+    if (!isNetworkError(err)) {
+      throw err
+    }
+    process.stderr.write(`  retrying after a network error: ${describeError(err)}\n`)
+    return uploadOnce(filePath, bytes)
+  }
+}
+
+async function uploadOnce(filePath, bytes) {
+  const { uploadId, uploadUrl } = await initiateUpload()
+  await postFileToUploader(uploadUrl, filePath, bytes)
+  await waitForReady(uploadId)
+  return uploadId
 }
 
 /**
@@ -359,11 +440,13 @@ async function stageOneSize({ template, label, parcels }) {
   }
 
   try {
-    const { uploadId, uploadUrl } = await initiateUpload()
-    await postFileToUploader(uploadUrl, filePath, bytes)
-    await waitForReady(uploadId)
+    const uploadId = await uploadAndWait(filePath, bytes)
     process.stderr.write(`  ready: ${uploadId}\n`)
-    return { label, parcels, bytes, uploadId }
+    // `template` has to travel with the upload. The prepared pools and the
+    // post-intervention ladder decide their endpoint and their file from it,
+    // and a size that lost it is staged as legacy — a template run then
+    // measures a legacy pair the flag-on service refuses.
+    return stagedSize({ template, label, parcels, bytes, uploadId })
   } finally {
     // A generated file has served its purpose either way — on success the
     // bytes now live in S3, and on failure a 9 MB scratch file has no reason
@@ -474,7 +557,7 @@ function writeCsv(path, rows) {
 async function preparePool({ template, label, count, uploadId }) {
   const endpoint = validateEndpointFor(template)
   const projects = []
-  for (let i = 0; i < count; i++) {
+  for await (const i of sequentially(steps(count))) {
     const created = await postJson(`${API_BASE_URL}/projects/new`, {
       project: { name: `perf ${label} prepared ${i + 1}` }
     })
@@ -504,7 +587,7 @@ async function preparePool({ template, label, count, uploadId }) {
  */
 async function preparedRows(projectIds) {
   const rows = []
-  for (const projectId of projectIds) {
+  for await (const projectId of projectIds) {
     const project = await getJson(`${API_BASE_URL}/projects/${projectId}`)
     const [feature] = editableHabitats(project?.project)
     if (!feature) {
@@ -545,9 +628,7 @@ async function stagePostIntervention({ label, parcels }) {
       `(generated in ${(postIntervention.generationMs / 1000).toFixed(1)}s) — uploading\n`
   )
   try {
-    const { uploadId, uploadUrl } = await initiateUpload()
-    await postFileToUploader(uploadUrl, piPath, postIntervention.bytes)
-    await waitForReady(uploadId)
+    const uploadId = await uploadAndWait(piPath, postIntervention.bytes)
     process.stderr.write(`  ready: ${uploadId}\n`)
     return uploadId
   } finally {
@@ -566,6 +647,36 @@ async function stagePostIntervention({ label, parcels }) {
  *
  * @param {string} template
  */
+/**
+ * A staged size, with the template it was staged as kept on it.
+ *
+ * @param {{ template: string, label: string, parcels: number, bytes: number, uploadId: string }} size
+ */
+export function stagedSize(size) {
+  return {
+    template: size.template,
+    label: size.label,
+    parcels: size.parcels,
+    bytes: size.bytes,
+    uploadId: size.uploadId
+  }
+}
+
+/**
+ * The upload the post-intervention ladder should replay, or null when the
+ * run has to stage a paired legacy file.
+ *
+ * A BNG Service template file already holds the post-intervention stage, so
+ * the upload staged for the size is the one. A legacy size, and a size whose
+ * template was never recorded, needs the pair.
+ *
+ * @param {{ template?: string, uploadId?: string }} size
+ * @returns {string | null}
+ */
+export function stagedPostInterventionUploadId(size) {
+  return size?.template === SERVICE_TEMPLATE ? size.uploadId : null
+}
+
 export function validateEndpointFor(template) {
   return template === SERVICE_TEMPLATE
     ? '/post-intervention/validate'
@@ -612,7 +723,7 @@ async function preflightTemplate(template, { label, uploadId }) {
   try {
     result = await postJson(`${API_BASE_URL}${endpoint}/${uploadId}`, {})
   } catch (err) {
-    throw new Error(`preflight ${endpoint} of ${label} failed: ${err.message}`)
+    throw new Error(`preflight ${endpoint} of ${label} failed: ${describeError(err)}`)
   }
   const mismatch = formatMismatchMessage(template, result)
   if (mismatch) {
@@ -633,9 +744,10 @@ async function ensureProjectPool() {
   const owned = Array.isArray(existing) ? existing : (existing?.projects ?? [])
   const ids = owned.map((p) => p.id).filter(Boolean)
 
-  while (ids.length < PROJECT_POOL_SIZE) {
+  const start = ids.length
+  for await (const offset of sequentially(steps(Math.max(0, PROJECT_POOL_SIZE - start)))) {
     const created = await postJson(`${API_BASE_URL}/projects/new`, {
-      project: { name: `perf upload ${ids.length + 1}` }
+      project: { name: `perf upload ${start + offset + 1}` }
     })
     ids.push(created.id)
   }
@@ -680,14 +792,14 @@ async function main() {
   // uploadId, and entrypoint.sh skips the phase that would have used it.
   const staged = []
   const failed = []
-  for (const size of sizes) {
+  for await (const size of sizes) {
     try {
       const result = await stageOneSize(size)
       staged.push(result)
       process.stdout.write(`uploadId_${result.label}=${result.uploadId}\n`)
     } catch (err) {
       failed.push(size.label)
-      process.stderr.write(`  ! ${size.label} did not stage: ${err.message}\n`)
+      process.stderr.write(`  ! ${size.label} did not stage: ${describeError(err)}\n`)
     }
   }
 
@@ -733,68 +845,95 @@ async function stagePreparedPools(staged) {
   )
   let contentionWritten = false
 
-  for (const { label, count } of wanted) {
-    const size = stagedByLabel.get(label)
-    if (!size) {
-      process.stderr.write(
-        `  ! no staged ${label} upload — cannot prepare its pool\n`
-      )
-      continue
-    }
-    try {
-      process.stderr.write(
-        `▸ preparing ${count} ${label} project(s) — validating the staged upload into each\n`
-      )
-      const projectIds = await preparePool({
-        template: size.template,
-        label,
-        count,
-        uploadId: size.uploadId
-      })
-      const rows = await preparedRows(projectIds)
-      if (rows.length === 0) {
-        throw new Error('no prepared project yielded an editable habitat')
-      }
-      const csvPath = join(STAGE_DIR, `prepared-${label}.csv`)
-      writeCsv(csvPath, rows)
-      process.stdout.write(`preparedCsv_${label}=${csvPath}\n`)
-      // The fetch ramp wants ONE project per size — the first of the pool.
-      process.stdout.write(`sizedProjectId_${label}=${rows[0][0]}\n`)
-      process.stderr.write(
-        `  prepared ${rows.length}/${count} ${label} project(s) → ${csvPath}\n`
-      )
+  for await (const { label, count } of sequentially(wanted)) {
+    contentionWritten = await prepareOnePool({
+      size: stagedByLabel.get(label),
+      label,
+      count,
+      piWanted,
+      contentionWritten
+    })
+  }
+}
 
-      // The contention ladder needs many features of ONE project, and any
-      // prepared project will do. The first size to get this far provides it.
-      if (!contentionWritten) {
-        contentionWritten = await writeContentionPool(rows[0][0])
-      }
-    } catch (err) {
-      process.stderr.write(
-        `  ! ${label} pool did not prepare: ${err.message}\n` +
-          `    Its edit, fetch and post-intervention phases will be skipped.\n`
-      )
-      continue
+/**
+ * One size's prepared pool, and its post-intervention upload when that size
+ * needs one. A pool that cannot be built leaves the phases that needed it to
+ * be skipped, and returns whether the contention pool has been written yet.
+ */
+async function prepareOnePool({ size, label, count, piWanted, contentionWritten }) {
+  if (!size) {
+    process.stderr.write(
+      `  ! no staged ${label} upload — cannot prepare its pool\n`
+    )
+    return contentionWritten
+  }
+  try {
+    process.stderr.write(
+      `▸ preparing ${count} ${label} project(s) — validating the staged upload into each\n`
+    )
+    const projectIds = await preparePool({
+      template: size.template,
+      label,
+      count,
+      uploadId: size.uploadId
+    })
+    const rows = await preparedRows(projectIds)
+    if (rows.length === 0) {
+      throw new Error('no prepared project yielded an editable habitat')
     }
+    const csvPath = join(STAGE_DIR, `prepared-${label}.csv`)
+    writeCsv(csvPath, rows)
+    process.stdout.write(`preparedCsv_${label}=${csvPath}\n`)
+    // The fetch ramp wants ONE project per size — the first of the pool.
+    process.stdout.write(`sizedProjectId_${label}=${rows[0][0]}\n`)
+    process.stderr.write(
+      `  prepared ${rows.length}/${count} ${label} project(s) → ${csvPath}\n`
+    )
 
-    if (piWanted.has(label) && size.template === SERVICE_TEMPLATE) {
-      // The template file already holds the post-intervention stage, so the
-      // upload staged for the size IS the post-intervention upload: one file,
-      // one scan, both endpoints.
-      process.stdout.write(`piUploadId_${label}=${size.uploadId}\n`)
-    } else if (piWanted.has(label)) {
-      try {
-        const uploadId = await stagePostIntervention({
-          label,
-          parcels: size.parcels
-        })
-        process.stdout.write(`piUploadId_${label}=${uploadId}\n`)
-      } catch (err) {
-        process.stderr.write(
-          `  ! ${label} post-intervention upload did not stage: ${err.message}\n`
-        )
-      }
+    // The contention ladder needs many features of ONE project, and any
+    // prepared project will do. The first size to get this far provides it.
+    if (!contentionWritten) {
+      contentionWritten = await writeContentionPool(rows[0][0])
     }
+  } catch (err) {
+    process.stderr.write(
+      `  ! ${label} pool did not prepare: ${describeError(err)}\n` +
+        `    Its edit, fetch and post-intervention phases will be skipped.\n`
+    )
+    return contentionWritten
+  }
+
+  await stagePostInterventionFor({ size, label, piWanted })
+  return contentionWritten
+}
+
+/** The post-intervention upload for one size, when the profile asks for it. */
+async function stagePostInterventionFor({ size, label, piWanted }) {
+  if (!piWanted.has(label)) {
+    return
+  }
+  const replayed = stagedPostInterventionUploadId(size)
+  if (replayed) {
+    // The template file already holds the post-intervention stage, so the
+    // upload staged for the size IS the post-intervention upload: one file,
+    // one scan, both endpoints.
+    process.stderr.write(
+      `▸ ${label} post-intervention: replaying the staged template upload\n`
+    )
+    process.stdout.write(`piUploadId_${label}=${replayed}\n`)
+    return
+  }
+  try {
+    const uploadId = await stagePostIntervention({
+      label,
+      parcels: size.parcels
+    })
+    process.stdout.write(`piUploadId_${label}=${uploadId}\n`)
+  } catch (err) {
+    process.stderr.write(
+      `  ! ${label} post-intervention upload did not stage: ${describeError(err)}\n`
+    )
   }
 }
 
@@ -839,8 +978,10 @@ async function writeContentionPool(projectId) {
 // editable-habitat filter) are worth unit-testing, and importing this module to
 // reach them must not start uploading things.
 if (process.argv[1]?.endsWith('stage-uploads.mjs')) {
-  main().catch((err) => {
-    process.stderr.write(`stage-uploads failed: ${err.message}\n`)
+  try {
+    await main()
+  } catch (err) {
+    process.stderr.write(`stage-uploads failed: ${describeError(err)}\n`)
     process.exit(1)
-  })
+  }
 }

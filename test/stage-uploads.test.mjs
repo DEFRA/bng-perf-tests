@@ -12,11 +12,15 @@ import { join } from 'node:path'
 import { test, describe } from 'node:test'
 
 import {
+  describeError,
   editableHabitats,
   formatMismatchMessage,
+  isNetworkError,
   manifestEntry,
   parsePreparedSizes,
   parseUploadTemplate,
+  stagedPostInterventionUploadId,
+  stagedSize,
   validateEndpointFor
 } from '../scripts/stage-uploads.mjs'
 
@@ -98,6 +102,41 @@ describe('validateEndpointFor', () => {
   })
 })
 
+describe('the post-intervention ladder replays the staged upload', () => {
+  test('a template size reuses its own upload', () => {
+    const size = stagedSize({
+      template: 'service',
+      label: 'normal',
+      parcels: 80,
+      bytes: 1,
+      uploadId: 'upload-1'
+    })
+    assert.equal(size.template, 'service')
+    assert.equal(stagedPostInterventionUploadId(size), 'upload-1')
+  })
+
+  test('a legacy size, and a size that lost its template, stages a pair', () => {
+    // Losing the template is what made a template run generate a legacy
+    // post-intervention file and measure the flag refusing it.
+    assert.equal(
+      stagedPostInterventionUploadId(
+        stagedSize({
+          template: 'legacy',
+          label: 'normal',
+          parcels: 80,
+          bytes: 1,
+          uploadId: 'upload-1'
+        })
+      ),
+      null
+    )
+    assert.equal(
+      stagedPostInterventionUploadId({ label: 'normal', uploadId: 'upload-1' }),
+      null
+    )
+  })
+})
+
 describe('formatMismatchMessage', () => {
   test('a pass is not a mismatch', () => {
     assert.equal(formatMismatchMessage('service', { valid: true, errors: [] }), null)
@@ -119,6 +158,30 @@ describe('formatMismatchMessage', () => {
     })
     assert.match(message, /LEGACY_TEMPLATE_NOT_ACCEPTED/)
     assert.match(message, /SERVICE_TEMPLATE_ENABLED=false/)
+  })
+})
+
+describe('a failed fetch', () => {
+  const networkError = () =>
+    new TypeError('fetch failed', {
+      cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' })
+    })
+
+  test('is reported with its cause, not as a bare "fetch failed"', () => {
+    // The large post-intervention upload once failed to stage with nothing
+    // more in the log than "fetch failed".
+    assert.equal(
+      describeError(networkError()),
+      'fetch failed (UND_ERR_SOCKET other side closed)'
+    )
+    assert.equal(describeError(new Error('POST x -> 500: boom')), 'POST x -> 500: boom')
+  })
+
+  test('is retried only when the service never answered', () => {
+    assert.equal(isNetworkError(networkError()), true)
+    // An error status is the service's answer; retrying would hide it.
+    assert.equal(isNetworkError(new Error('POST x -> 500: boom')), false)
+    assert.equal(isNetworkError(new TypeError('x is not a function')), false)
   })
 })
 

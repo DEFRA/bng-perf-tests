@@ -491,6 +491,19 @@ Tighten the allowances from that number after the first real run. Until then the
 window is sized to be wrong in the direction that costs wall clock rather than
 the direction that costs the result.
 
+These allowances, and the latency budgets (`validateBudgetMs`, `normalBudgetMs`,
+`journeyBudgetMs`, `journeyLargeBudgetMs`), are **frozen per template**:
+`entrypoint.sh` resolves a `legacy` set and a `service` set (the `TMPL_*` block,
+just after `UPLOAD_TEMPLATE`). The legacy set is the calibrated one above and
+stays put; the service set is **seeded identical to it today** and is the only
+thing to retune once a complete service run exists — a service upload carries the
+baseline and post-intervention stage in one file, so its post-intervention
+validate is the heavier path that may want a looser red line than a legacy
+baseline validate. `edit`/`fetch` budgets stay shared (same work either way), and
+an explicit `SIZE_ALLOWANCE_*` / `*_BUDGET_MS` env var still overrides either set.
+Calibrating the service numbers is deferred to BMD-1097; the seam is in place now
+so the legacy numbers can be frozen without blocking that work.
+
 #### What it uploads, and where the fixtures come from
 
 `scripts/make-gpkg.mjs` builds a valid baseline GeoPackage of any size by
@@ -597,8 +610,11 @@ derives it from `bng-perf.jmx`, swapping only the plan name, its header and the
 in `scripts/gen-scenario.mjs`) and rendering the ladders for the template. Edit
 `bng-perf.jmx` and regenerate; `npm run check-scenario` fails if either plan is
 stale or the template plan's hand-written half has drifted. The size-ramp
-allowances are shared: the ramp validates through `/baseline/validate` in both
-plans, and the ramp-coverage table says if a pass was cut off.
+allowances (and the latency budgets) are resolved per template in `entrypoint.sh`
+but **seeded identical today**: the ramp validates through `/baseline/validate`
+in both plans, so there is nothing yet to tell them apart. The service set exists
+so it can be tuned on its own after a complete service run (see the allowances
+note above); until then the ramp-coverage table says if a pass was cut off.
 
 The template fixtures come from `bng-library`'s `generateSyntheticGpkg` with
 `format: 'bng-service'`, seeded on the parcel count like the legacy ones, with
@@ -617,7 +633,9 @@ library's own lineage and value checks pass on all four:
 
 When the legacy template is decommissioned (BMD-1097), the template plan's values
 become `bng-perf.jmx`'s own, `bng-perf-template.jmx`, `TEMPLATE_SHELL_EDITS` and
-the `baseline-*` fixtures go, and `UPLOAD_TEMPLATE` goes with them.
+the `baseline-*` fixtures go, and `UPLOAD_TEMPLATE` goes with them — as does the
+`TMPL_*` per-template fork in `entrypoint.sh`, with the surviving set becoming the
+only one.
 
 ##### Recorded baselines
 
@@ -628,8 +646,8 @@ environment, with the run id:
 
 | Environment | Template | Run id | Size ramp `normal` p95 | Journey `normal` @ 1 user p95 | Notes |
 | ----------- | -------- | ------ | ---------------------- | ----------------------------- | ----- |
-| local       | legacy   |        |                        |                               |       |
-| local       | service  |        |                        |                               |       |
+| local       | legacy   | `20261102-120426` | 387 ms | 4.3 s | Every phase staged and ran, the large post-intervention ladder included (its upload staged on a retry after a dropped connection). Ramp completed (52 s of 160 s); xlarge p95 14.0 s, no failures. The fixtures were regenerated for the `bng-library` bump, so earlier legacy numbers are from different files. Same stack, on `main` (`20261102-114237`): the large post-intervention upload did not stage, every normal post-intervention validate failed, and both xlarge ramp samples returned 500. Edit and fetch ran slower than on `main` because they start straight after the large post-intervention ladder, which never ran there; a rerun with that ladder off (`20261102-124057`) brought them back to within tens of milliseconds of `main`. |
+| local       | service  | `20261028-160100` | 1.2 s | 4.1 s | Ramp completed (39 s of 160 s). The xlarge prepared pool returned 500, so its edit, fetch and post-intervention phases were skipped. |
 | dev (CDP)   | legacy   |        |                        |                               |       |
 | dev (CDP)   | service  |        |                        |                               |       |
 

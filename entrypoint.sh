@@ -293,6 +293,45 @@ case "${UPLOAD_TEMPLATE}" in
 esac
 SCENARIOFILE=${JM_SCENARIOS}/${SCENARIO}.jmx
 
+# ── Per-template allowances and budgets (frozen sets) ───────────────────────
+# The size-ramp allowances (how long a validate is given before the window
+# closes) and the latency budgets (the report's red lines) are frozen PER
+# TEMPLATE. The legacy plan keeps exactly the numbers it was calibrated with,
+# while the BNG Service template carries its own set that can be tuned on its
+# own — the two files do different work: a service upload carries both the
+# baseline and the post-intervention stage in one file, so its post-intervention
+# validate (the pi ladder, and the template journey's validate leg) is the
+# heavier path that may want a looser red line than a legacy baseline validate.
+#
+# BOTH SETS ARE IDENTICAL TODAY. The `service` column is seeded from legacy on
+# purpose: nobody has a complete service run to calibrate from yet. Once that
+# run exists, tune ONLY the `service` branch below from its summary — the
+# `legacy` branch is frozen and stays as-is until the legacy template is
+# decommissioned (BMD-1097), at which point this whole fork is removed and the
+# surviving set becomes the only one. An explicit SIZE_ALLOWANCE_* / *_BUDGET_MS
+# env var still overrides whichever set applies.
+if [ "${UPLOAD_TEMPLATE}" = "service" ]; then
+  # Calibrate from the first complete service run, then edit here.
+  TMPL_SIZE_ALLOWANCE_NORMAL_SECONDS=2
+  TMPL_SIZE_ALLOWANCE_MEDIUM_SECONDS=4
+  TMPL_SIZE_ALLOWANCE_LARGE_SECONDS=12
+  TMPL_SIZE_ALLOWANCE_XLARGE_SECONDS=26
+  TMPL_VALIDATE_BUDGET_MS=30000
+  TMPL_NORMAL_BUDGET_MS=5000
+  TMPL_JOURNEY_BUDGET_MS=35000
+  TMPL_JOURNEY_LARGE_BUDGET_MS=60000
+else
+  # Frozen — the legacy plan's calibrated numbers. Do not retune these.
+  TMPL_SIZE_ALLOWANCE_NORMAL_SECONDS=2
+  TMPL_SIZE_ALLOWANCE_MEDIUM_SECONDS=4
+  TMPL_SIZE_ALLOWANCE_LARGE_SECONDS=12
+  TMPL_SIZE_ALLOWANCE_XLARGE_SECONDS=26
+  TMPL_VALIDATE_BUDGET_MS=30000
+  TMPL_NORMAL_BUDGET_MS=5000
+  TMPL_JOURNEY_BUDGET_MS=35000
+  TMPL_JOURNEY_LARGE_BUDGET_MS=60000
+fi
+
 # Read a generated per-profile value. The keys come from ladders.sh, which this
 # repo generates, so they are known-safe identifiers rather than operator input.
 profile_value() {
@@ -357,10 +396,12 @@ PROBE_BASELINE_SECONDS=${PROBE_BASELINE_SECONDS:-25}
 # ramp simply ends; the cost of being generous is dead air before the next
 # phase, which is why summarise-run.mjs reports how much of the window the ramp
 # actually used. Tighten them from that number after the first real run.
-SIZE_ALLOWANCE_NORMAL_SECONDS=${SIZE_ALLOWANCE_NORMAL_SECONDS:-2}
-SIZE_ALLOWANCE_MEDIUM_SECONDS=${SIZE_ALLOWANCE_MEDIUM_SECONDS:-4}
-SIZE_ALLOWANCE_LARGE_SECONDS=${SIZE_ALLOWANCE_LARGE_SECONDS:-12}
-SIZE_ALLOWANCE_XLARGE_SECONDS=${SIZE_ALLOWANCE_XLARGE_SECONDS:-26}
+# The defaults come from the per-template set resolved above (TMPL_*), so the
+# legacy and service plans can diverge here without touching this derivation.
+SIZE_ALLOWANCE_NORMAL_SECONDS=${SIZE_ALLOWANCE_NORMAL_SECONDS:-${TMPL_SIZE_ALLOWANCE_NORMAL_SECONDS}}
+SIZE_ALLOWANCE_MEDIUM_SECONDS=${SIZE_ALLOWANCE_MEDIUM_SECONDS:-${TMPL_SIZE_ALLOWANCE_MEDIUM_SECONDS}}
+SIZE_ALLOWANCE_LARGE_SECONDS=${SIZE_ALLOWANCE_LARGE_SECONDS:-${TMPL_SIZE_ALLOWANCE_LARGE_SECONDS}}
+SIZE_ALLOWANCE_XLARGE_SECONDS=${SIZE_ALLOWANCE_XLARGE_SECONDS:-${TMPL_SIZE_ALLOWANCE_XLARGE_SECONDS}}
 
 # The weights themselves. Defaulted HERE rather than only in the .jmx, because
 # the window derivation needs them; they are still passed through as properties,
@@ -524,8 +565,18 @@ derive_ladder_delays() {
 # a red *assertion* at 20s rather than a slow sample, and "the scan queue backed
 # up" read in the report as "the service broke". 35s puts the budget on the far
 # side of that, so a red duration here means slow and a red status means broken.
-JOURNEY_BUDGET_MS=${JOURNEY_BUDGET_MS:-35000}
-JOURNEY_LARGE_BUDGET_MS=${JOURNEY_LARGE_BUDGET_MS:-60000}
+#
+# validateBudgetMs / normalBudgetMs and the journey budgets come from the
+# per-template set resolved above (TMPL_*). validateBudgetMs is the red line the
+# service's heavier post-intervention validate is most likely to move, so it is
+# resolved here (frozen at the plan's own 30000/5000 defaults today) rather than
+# left to the .jmx so the two templates can diverge without editing the plan.
+# edit/fetch do the same work regardless of how the project was uploaded, so
+# those budgets stay shared.
+VALIDATE_BUDGET_MS=${VALIDATE_BUDGET_MS:-${TMPL_VALIDATE_BUDGET_MS}}
+NORMAL_BUDGET_MS=${NORMAL_BUDGET_MS:-${TMPL_NORMAL_BUDGET_MS}}
+JOURNEY_BUDGET_MS=${JOURNEY_BUDGET_MS:-${TMPL_JOURNEY_BUDGET_MS}}
+JOURNEY_LARGE_BUDGET_MS=${JOURNEY_LARGE_BUDGET_MS:-${TMPL_JOURNEY_LARGE_BUDGET_MS}}
 EDIT_BUDGET_MS=${EDIT_BUDGET_MS:-3000}
 EDIT_RESPONSE_TIMEOUT_MS=${EDIT_RESPONSE_TIMEOUT_MS:-30000}
 FETCH_BUDGET_MS=${FETCH_BUDGET_MS:-5000}
