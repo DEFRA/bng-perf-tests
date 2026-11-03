@@ -501,17 +501,16 @@ post-intervention stage in one file, so its post-intervention validate is the
 heavier path. `edit`/`fetch` budgets stay shared (same work either way), and an
 explicit `SIZE_ALLOWANCE_*` / `*_BUDGET_MS` env var still overrides either set.
 
-The first complete service run (`20261102-142548`, in the baselines table below)
-is the evidence for leaving the two sets equal so far. The ramp's
-`/baseline/validate` is template-agnostic in the data — `normal` p95 388 ms vs
-the legacy 387 ms — so the size allowances are shared on purpose, not by
-omission. The one path that genuinely diverges is post-intervention `large`, and
-it only breaches the budget under concurrency (12.3 s at 1 user, 90.8 s at 5),
-which is a performance finding to investigate on a dedicated box rather than a
-red line to widen on a saturated local one. So the service budgets are **not**
-loosened to match that number; they are revisited once a dev (CDP) run separates
-service behaviour from local capacity, and must go with the legacy set at
-BMD-1097 regardless.
+The two perf-test runs on 3 Nov 2026 (baselines table below) are the evidence
+for leaving the sets equal. On the same box the ramp barely moves with the
+template: legacy `normal` p95 256 ms and `xlarge` 5.7 s, service 294 ms and
+6.1 s, both inside the 2 s and 26 s allowances. The template-heavy paths are
+slower for the service file and still inside budget. Post-intervention `large`
+is 3.8 s at 1 user and 14.2 s at 5 with no errors on legacy, against 6.2 s and
+17.0 s (2 of 5 errors) on service. The local 90 s cliff does not appear on
+either. A large edit at 5 users exceeds the shared 3 s `editBudgetMs` on both
+(5.4 s legacy, 6.4 s service), so that stays a large-project cost. Both sets
+still go at BMD-1097.
 
 #### What it uploads, and where the fixtures come from
 
@@ -656,9 +655,9 @@ environment, with the run id:
 | Environment | Template | Run id | Size ramp `normal` p95 | Journey `normal` @ 1 user p95 | Notes |
 | ----------- | -------- | ------ | ---------------------- | ----------------------------- | ----- |
 | local       | legacy   | `20261102-120426` | 387 ms | 4.3 s | Every phase staged and ran, the large post-intervention ladder included (its upload staged on a retry after a dropped connection). Ramp completed (52 s of 160 s); xlarge p95 14.0 s, no failures. The fixtures were regenerated for the `bng-library` bump, so earlier legacy numbers are from different files. Same stack, on `main` (`20261102-114237`): the large post-intervention upload did not stage, every normal post-intervention validate failed, and both xlarge ramp samples returned 500. Edit and fetch ran slower than on `main` because they start straight after the large post-intervention ladder, which never ran there; a rerun with that ladder off (`20261102-124057`) brought them back to within tens of milliseconds of `main`. |
-| local       | service  | `20261102-142548` | 388 ms | 4.4 s | First **complete** service run: every phase staged and ran, ramp completed all four sizes (50 s of 160 s). The shared paths match legacy almost exactly — ramp `normal` 388 ms vs 387 ms, journey `normal` @ 1 user 4.4 s vs 4.3 s — which is the data behind sharing the ramp allowances. The template-heavy post-intervention path is where it diverges, and only under concurrency: post-intervention validate `large` is 12.3 s p95 at 1 user (within the 30 s budget) but 90.8 s p95 with 80% failing at 5 users, and the journey `large` end-to-end goes 18.1 s → 52.9 s (1 → 5 users). This is a local single-box run (backend, frontend, uploader, JMeter all co-resident), so the concurrency cliffs are confounded with local capacity — the `@ 1 user` columns are the trustworthy signal. The budget set stays equal to legacy pending a dev (CDP) run that can separate service behaviour from local saturation; 90 s is a performance finding to investigate, not a red line to relax. See the run breakdown canvas for the full triage. |
-| dev (CDP)   | legacy   |        |                        |                               |       |
-| dev (CDP)   | service  | `20261103-094944` | — | — | **Void — not a baseline.** Run on perf-test from the CDP portal, and every validate call failed at ~150–250 ms regardless of file size or concurrency (size ramp `normal` 153 ms, `xlarge` 261 ms, both 100% error; journey validate 100% error at every size and user count). Validation did no work: the latency is a flat fast rejection, not a measured cost. The non-validate legs passed (initiate, send file, wait for scan, project creation, the home page), so the service was healthy and only the validate step rejected the file. That is the template format gate refusing the upload — this run's image pre-dates the staging preflight that would have stopped it at staging instead of letting it report a falsely quick service. Re-run once the perf-test image contains the preflight and `SERVICE_TEMPLATE_ENABLED=true` is confirmed live on the backend. |
+| local       | service  | `20261102-142548` | 388 ms | 4.4 s | First **complete** service run: every phase staged and ran, ramp completed all four sizes (50 s of 160 s). The shared paths match legacy almost exactly — ramp `normal` 388 ms vs 387 ms, journey `normal` @ 1 user 4.4 s vs 4.3 s — which is the data behind sharing the ramp allowances. The template-heavy post-intervention path is where it diverges, and only under concurrency: post-intervention validate `large` is 12.3 s p95 at 1 user (within the 30 s budget) but 90.8 s p95 with 80% failing at 5 users, and the journey `large` end-to-end goes 18.1 s → 52.9 s (1 → 5 users). This is a local single-box run (backend, frontend, uploader, JMeter all co-resident), so the concurrency cliffs are confounded with local capacity — the `@ 1 user` columns are the trustworthy signal. The perf-test rows below separate that from local capacity: the 90 s cliff does not recur, and the budget set stays equal to legacy. See the run breakdown canvas for the full triage. |
+| perf-test   | legacy   | 3 Nov 2026 | 256 ms | 941 ms p95 (validate leg; median 256 ms) | Complete legacy run on perf-test, 157/5929 samples failed (2.65%). Size ramp p95: normal 256 ms, medium 722 ms, large 2.6 s, xlarge 5.7 s, none failing. Post-intervention validate `large` is 3.8 s p95 at 1 user and 14.2 s at 5, both with no errors, inside the 30 s budget. The journey `large` validate leg is 2.2 s at 1 user, 8.0 s at 5 (no errors) and 8.3 s at 10 (4 of 10 errors), inside the 60 s budget. The dashboard has no end-to-end journey row, so the journey column is the validate leg; its p95 is one sample of seven and the median is 256 ms. Failures are the BMD-933 list assertion (`list a user's projects` and the project-list probe, both 100%) plus the shared large-edit miss at 5 users (5.4 s p95, 13 of 15) and errors as large revalidates climb past 10 users. |
+| perf-test   | service  | 3 Nov 2026 | 294 ms | 466 ms (validate leg) | First **complete** service run on perf-test, 21 min, 172/4489 samples failed (3.83%). Every phase ran, including post-intervention, edit and fetch. Size ramp p95 scales with the file: normal 294 ms, medium 746 ms, large 3.0 s, xlarge 6.1 s, none failing. Post-intervention validate `large` is 6.2 s p95 at 1 user and 17.0 s at 5 (2/5 errors); the journey `large` validate leg is 5.9 s at 1 user and 15.8 s at 5 (2/5 errors). Both sit inside the 30 s and 60 s budgets, so the local 90 s cliff was the single box. The dashboard has no end-to-end journey row, so the journey column is the validate leg, not the 4.4 s end-to-end figure recorded locally. The remaining failures are the by-design BMD-933 list assertion (`list my projects`, `list a user's projects`, and the project-list probe, all 100%) plus errors that appear as concurrency rises on large validates. `20261103-094944` was an earlier void run of this environment: every validate failed in ~200 ms at the format gate, before this image and the `baseline_vertical_habitats` migration were in place. |
 
 #### Staging: what is measured and what is not
 
