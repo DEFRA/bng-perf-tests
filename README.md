@@ -491,6 +491,28 @@ Tighten the allowances from that number after the first real run. Until then the
 window is sized to be wrong in the direction that costs wall clock rather than
 the direction that costs the result.
 
+These allowances, and the latency budgets (`validateBudgetMs`, `normalBudgetMs`,
+`journeyBudgetMs`, `journeyLargeBudgetMs`), are **frozen per template**:
+`entrypoint.sh` resolves a `legacy` set and a `service` set (the `TMPL_*` block,
+just after `UPLOAD_TEMPLATE`). The legacy set is the calibrated one above and
+stays put; the service set is **seeded identical to it** and is the place to
+retune the template on its own — a service upload carries the baseline and
+post-intervention stage in one file, so its post-intervention validate is the
+heavier path. `edit`/`fetch` budgets stay shared (same work either way), and an
+explicit `SIZE_ALLOWANCE_*` / `*_BUDGET_MS` env var still overrides either set.
+
+The first complete service run (`20261102-142548`, in the baselines table below)
+is the evidence for leaving the two sets equal so far. The ramp's
+`/baseline/validate` is template-agnostic in the data — `normal` p95 388 ms vs
+the legacy 387 ms — so the size allowances are shared on purpose, not by
+omission. The one path that genuinely diverges is post-intervention `large`, and
+it only breaches the budget under concurrency (12.3 s at 1 user, 90.8 s at 5),
+which is a performance finding to investigate on a dedicated box rather than a
+red line to widen on a saturated local one. So the service budgets are **not**
+loosened to match that number; they are revisited once a dev (CDP) run separates
+service behaviour from local capacity, and must go with the legacy set at
+BMD-1097 regardless.
+
 #### What it uploads, and where the fixtures come from
 
 `scripts/make-gpkg.mjs` builds a valid baseline GeoPackage of any size by
@@ -538,8 +560,8 @@ where the service stops coping, not because anyone submits them today.
 | Label      | Parcels | File size | Generation |
 | ---------- | ------- | --------- | ---------- |
 | `normal` | 80      | 140 KB    | 0.02 s     |
-| `medium`   | 800     | 704 KB    | 0.08 s     |
-| `large`    | 5 000   | 4.0 MB    | 1.6 s      |
+| `medium`   | 800     | 708 KB    | 0.08 s     |
+| `large`    | 5 000   | 3.9 MB    | 1.6 s      |
 | `xlarge`   | 12 000  | 9.3 MB    | 9.0 s      |
 
 The ramp stops at `xlarge`. At 12 000 parcels it is already two orders of
@@ -550,6 +572,93 @@ in `bng-library` re-sorts the whole parcel list on every split, so 4× the
 parcels costs roughly 19× the time. Staging the whole ramp costs ~11 s of
 generation before JMeter starts; each step's time is logged so a slow-looking
 start is identifiable as setup.
+
+#### The BNG Service template — `UPLOAD_TEMPLATE=service`
+
+The service is moving from one legacy GeoPackage per stage to the **BNG Service
+template**: one file holding both the Baseline and the Post-intervention stage.
+Which one it accepts is the backend's `SERVICE_TEMPLATE_ENABLED` flag — never
+both — so the suite runs in one of two modes:
+
+| `UPLOAD_TEMPLATE` | Plan                              | Fixtures                       | Target must have                  |
+| ----------------- | --------------------------------- | ------------------------------ | --------------------------------- |
+| `legacy` (default) | `scenarios/bng-perf.jmx`         | `fixtures/baseline-<size>.gpkg` | `SERVICE_TEMPLATE_ENABLED=false` |
+| `service`         | `scenarios/bng-perf-template.jmx` | `fixtures/template-<size>.gpkg` | `SERVICE_TEMPLATE_ENABLED=true`  |
+
+```bash
+UPLOAD_TEMPLATE=service docker compose up --build      # locally, against a flag-on stack
+PERF_TEMPLATE=service npm run perf                     # from the harness, after npm run dev:service-template
+```
+
+On CDP the variable is set like any other suite env var, in the environment's
+config — which is where it belongs, since the flag it has to match is per
+environment too.
+
+**A mismatch fails the run at staging, not in the report.** The suite cannot read
+the service's flag, so once the uploads are staged `stage-uploads.mjs` validates
+the first one — before preparing any project pool or starting JMeter — and stops,
+naming the flag value the target needs, if the
+format gate refuses it (`LEGACY_TEMPLATE_NOT_ACCEPTED` one way, a missing
+legacy layer the other). Without that, every validate in the run would be a fast
+rejection, and the run would report the service as quicker than it has ever been.
+
+**The template plan is the same suite.** Same phases, same schedule, same sampler
+names — so a template run's summary lines up row for row with a legacy run's.
+Each ladder keeps its legacy endpoint, so the two compare like with like:
+
+| Phase                                      | Template run                                                              |
+| ------------------------------------------ | ------------------------------------------------------------------------- |
+| Size ramp, revalidate, saturation, mixed   | `/baseline/validate`, which reads the template file's Baseline tables    |
+| Post-intervention ladder                   | `/post-intervention/validate` on the **same** upload — no pair to stage, as the file holds both stages; the endpoint checks both and the lineage between them, then stores both documents |
+| Upload journey                             | validate leg is `/post-intervention/validate`: the single-file upload a template user makes |
+| Burst (`--template`)                       | the frontend's post-intervention upload page, which needs no baseline first |
+
+`scenarios/bng-perf-template.jmx` is **generated** — `npm run gen-scenario`
+derives it from `bng-perf.jmx`, swapping only the plan name, its header and the
+`journeyFile_<size>` fallbacks in the hand-written half (`TEMPLATE_SHELL_EDITS`
+in `scripts/gen-scenario.mjs`) and rendering the ladders for the template. Edit
+`bng-perf.jmx` and regenerate; `npm run check-scenario` fails if either plan is
+stale or the template plan's hand-written half has drifted. The size-ramp
+allowances (and the latency budgets) are resolved per template in `entrypoint.sh`
+but **seeded identical today**: the ramp validates through `/baseline/validate`
+in both plans, so there is nothing yet to tell them apart. The service set exists
+so it can be tuned on its own after a complete service run (see the allowances
+note above); until then the ramp-coverage table says if a pass was cut off.
+
+The template fixtures come from `bng-library`'s `generateSyntheticGpkg` with
+`format: 'bng-service'`, seeded on the parcel count like the legacy ones, with
+the same red line and parcel counts and no irreplaceable-habitat layers. The
+library's own lineage and value checks pass on all four:
+
+| Label    | Parcels | Template file | Legacy file |
+| -------- | ------- | ------------- | ----------- |
+| `normal` | 80      | 188 KB        | 140 KB      |
+| `medium` | 800     | 888 KB        | 708 KB      |
+| `large`  | 5 000   | 4.8 MB        | 3.9 MB      |
+| `xlarge` | 12 000  | 11.4 MB       | 9.3 MB      |
+
+`manifest.json` lists every size once per template, under the same labels, with a
+`template` field (`legacy` | `service`) saying which.
+
+When the legacy template is decommissioned (BMD-1097), the template plan's values
+become `bng-perf.jmx`'s own, `bng-perf-template.jmx`, `TEMPLATE_SHELL_EDITS` and
+the `baseline-*` fixtures go, and `UPLOAD_TEMPLATE` goes with them — as does the
+`TMPL_*` per-template fork in `entrypoint.sh`, with the surviving set becoming the
+only one.
+
+##### Recorded baselines
+
+The template's first numbers, to compare later runs against. Fill these in from
+the run summary (the `normal` row of the size ramp, and the journey's
+end-to-end p95) after the first full run of each template on the same
+environment, with the run id:
+
+| Environment | Template | Run id | Size ramp `normal` p95 | Journey `normal` @ 1 user p95 | Notes |
+| ----------- | -------- | ------ | ---------------------- | ----------------------------- | ----- |
+| local       | legacy   | `20261102-120426` | 387 ms | 4.3 s | Every phase staged and ran, the large post-intervention ladder included (its upload staged on a retry after a dropped connection). Ramp completed (52 s of 160 s); xlarge p95 14.0 s, no failures. The fixtures were regenerated for the `bng-library` bump, so earlier legacy numbers are from different files. Same stack, on `main` (`20261102-114237`): the large post-intervention upload did not stage, every normal post-intervention validate failed, and both xlarge ramp samples returned 500. Edit and fetch ran slower than on `main` because they start straight after the large post-intervention ladder, which never ran there; a rerun with that ladder off (`20261102-124057`) brought them back to within tens of milliseconds of `main`. |
+| local       | service  | `20261102-142548` | 388 ms | 4.4 s | First **complete** service run: every phase staged and ran, ramp completed all four sizes (50 s of 160 s). The shared paths match legacy almost exactly — ramp `normal` 388 ms vs 387 ms, journey `normal` @ 1 user 4.4 s vs 4.3 s — which is the data behind sharing the ramp allowances. The template-heavy post-intervention path is where it diverges, and only under concurrency: post-intervention validate `large` is 12.3 s p95 at 1 user (within the 30 s budget) but 90.8 s p95 with 80% failing at 5 users, and the journey `large` end-to-end goes 18.1 s → 52.9 s (1 → 5 users). This is a local single-box run (backend, frontend, uploader, JMeter all co-resident), so the concurrency cliffs are confounded with local capacity — the `@ 1 user` columns are the trustworthy signal. The budget set stays equal to legacy pending a dev (CDP) run that can separate service behaviour from local saturation; 90 s is a performance finding to investigate, not a red line to relax. See the run breakdown canvas for the full triage. |
+| dev (CDP)   | legacy   |        |                        |                               |       |
+| dev (CDP)   | service  | `20261103-094944` | — | — | **Void — not a baseline.** Run on perf-test from the CDP portal, and every validate call failed at ~150–250 ms regardless of file size or concurrency (size ramp `normal` 153 ms, `xlarge` 261 ms, both 100% error; journey validate 100% error at every size and user count). Validation did no work: the latency is a flat fast rejection, not a measured cost. The non-validate legs passed (initiate, send file, wait for scan, project creation, the home page), so the service was healthy and only the validate step rejected the file. That is the template format gate refusing the upload — this run's image pre-dates the staging preflight that would have stopped it at staging instead of letting it report a falsely quick service. Re-run once the perf-test image contains the preflight and `SERVICE_TEMPLATE_ENABLED=true` is confirmed live on the backend. |
 
 #### Staging: what is measured and what is not
 
@@ -714,6 +823,7 @@ run is meaningless.
 | -------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
 | `PROFILE`                        | unset → `standard`                             | **The CDP portal's Profile field.** Names a profile (`standard` \| `short`). This is the variable a CDP task carries; every run states what it resolved. |
 | `TEST_SCENARIO`                  | `bng-perf`                                     | Names a **plan** (`scenarios/<name>.jmx`), and — second, for local runs — a profile. Owned by the base image, never set by the portal. |
+| `UPLOAD_TEMPLATE`                | `legacy`                                       | `legacy` or `service` — which upload template the run uploads, and so which plan it runs. Must match the target's `SERVICE_TEMPLATE_ENABLED`; see [the BNG Service template](#the-bng-service-template--upload_templateservice). |
 | `UPLOAD_SIZES`                   | `normal:80,medium:800,large:5000,xlarge:12000` | How big each step is. `label:parcels` pairs — the **labels are fixed**, see below. |
 | `STAGE_UPLOADS`                  | `true` for this plan                           | `false` skips staging *and* every phase that needed it.         |
 | `CDP_UPLOADER_URL`               | `https://cdp-uploader.<ENVIRONMENT>.cdp-int.defra.cloud` | The uploader to POST staged files to.                 |
@@ -1025,8 +1135,14 @@ page each one reached — `--linger <seconds>` to change it, `--linger 0` to clo
 at once, or `--keep-open` to wait for Enter instead.
 
 `--size` takes a label from `fixtures/manifest.json` — `normal` (80 parcels),
-`busy` (800), `large` (5,000, the default) or `xlarge` (12,000) — so a window
+`medium` (800), `large` (5,000, the default) or `xlarge` (12,000) — so a window
 uploads exactly the file a JMeter phase would. `--file` takes a path instead.
+
+`--template` bursts the BNG Service template instead: each window uploads the
+size's `template-<size>.gpkg` through the post-intervention upload page, which
+stores both stages and needs no baseline first. The service must be running with
+`SERVICE_TEMPLATE_ENABLED=true`; against a flag-off service every window comes
+back with the format error, which is a quick way to tell.
 
 Three things it does deliberately:
 

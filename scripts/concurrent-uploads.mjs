@@ -1,6 +1,7 @@
 /**
- * Fire N concurrent baseline GeoPackage uploads at a running BNG Metric service
- * and watch them all happen at once, in tiled browser windows.
+ * Fire N concurrent GeoPackage uploads at a running BNG Metric service — legacy
+ * baselines, or the BNG Service template with --template — and watch them all
+ * happen at once, in tiled browser windows.
  *
  * This is a watch-it-happen tool, not a load generator. The JMeter plan next to
  * it is the thing that measures; this is for seeing with your own eyes what a
@@ -47,6 +48,19 @@ const MANIFEST = path.join(FIXTURES_DIR, 'manifest.json')
 /** The suite's own size ladder is the natural thing to burst with. */
 const DEFAULT_SIZE = 'large'
 const DEFAULT_COUNT = 4
+
+/**
+ * Which upload page each template's file goes through.
+ *
+ * A BNG Service template file holds both stages, and the frontend has no
+ * combined page yet: the post-intervention page is the one whose validate
+ * stores both, and it does not need a baseline first. Against a service with
+ * SERVICE_TEMPLATE_ENABLED=true that is the template upload a user makes.
+ */
+export const UPLOAD_PAGES = Object.freeze({
+  legacy: 'upload-baseline-file',
+  service: 'upload-post-intervention-file'
+})
 
 /**
  * Hard ceiling on windows.
@@ -140,7 +154,7 @@ const warn = (msg) => console.warn(color('yellow', `! ${msg}`))
 const fail = (msg) => console.error(color('red', `x ${msg}`))
 
 export const HELP = `
-Fire N concurrent baseline uploads at the BNG Metric service in tiled windows.
+Fire N concurrent uploads at the BNG Metric service in tiled windows.
 
   node scripts/concurrent-uploads.mjs --url <base-url> --user <id> [options]
 
@@ -171,9 +185,14 @@ Options
   --count <n>          Windows / concurrent uploads. Default ${DEFAULT_COUNT},
                        capped at ${MAX_WINDOWS} - past that the browsers contend
                        with each other and you are measuring this machine.
-  --size <label>       Which of the suite's baselines to upload:
-                       normal (80 parcels) | busy (800) | large (5,000) |
+  --size <label>       Which of the suite's fixtures to upload:
+                       normal (80 parcels) | medium (800) | large (5,000) |
                        xlarge (12,000). Default ${DEFAULT_SIZE}.
+  --template           Upload the BNG Service template instead of the legacy
+                       baseline: the size's template-<size>.gpkg, through the
+                       post-intervention upload page. Needs a service with
+                       SERVICE_TEMPLATE_ENABLED=true. With --file, the file
+                       must be a template GeoPackage.
   --file <path>        Upload a GeoPackage of your own instead of --size.
   --auth <provider>    one-login | government-gateway | auto (default).
                        auto drives whichever sign-in page actually renders.
@@ -200,6 +219,10 @@ Examples
   BNG_PASSWORD=... node scripts/concurrent-uploads.mjs \\
     --url https://bng-metric-frontend.dev.cdp-int.defra.cloud \\
     --user 123456789012 --count 9 --size xlarge --screen 3440x1440 --keep-open
+
+  # Four BNG Service template uploads, at a service with the template enabled
+  node scripts/concurrent-uploads.mjs \\
+    --url http://localhost:3000 --user 123456789012 --template
 `
 
 /** Options that take a value. Anything else with a `--` is a mistake. */
@@ -226,6 +249,7 @@ const FLAG_OPTIONS = new Set([
   '--manual-login',
   '--show-login',
   '--share-session',
+  '--template',
   '--help',
   '-h'
 ])
@@ -728,7 +752,13 @@ export async function manualSignIn(page, baseUrl) {
  * Everything slow and uninteresting happens here, before the starting line, so
  * that the only thing left to do when the barrier lifts is submit.
  */
-export async function stageUpload(page, baseUrl, filePath, label) {
+export async function stageUpload(
+  page,
+  baseUrl,
+  filePath,
+  label,
+  uploadPage = UPLOAD_PAGES.legacy
+) {
   await page.goto(`${baseUrl}/manage-projects`, {
     waitUntil: 'domcontentloaded',
     timeout: SETUP_TIMEOUT
@@ -757,7 +787,7 @@ export async function stageUpload(page, baseUrl, filePath, label) {
     throw new Error(`Could not read a project id from "${href}"`)
   }
 
-  await page.goto(`${baseUrl}/projects/${projectId}/upload-baseline-file`, {
+  await page.goto(`${baseUrl}/projects/${projectId}/${uploadPage}`, {
     waitUntil: 'domcontentloaded',
     timeout: SETUP_TIMEOUT
   })
@@ -1191,20 +1221,33 @@ export function parseCols(value) {
   return cols
 }
 
-/** The size ladder this suite already generates and commits. */
-export async function readSizes() {
-  return JSON.parse(await fs.readFile(MANIFEST, 'utf8')).sizes
+/**
+ * The size ladder this suite already generates and commits, for one template.
+ *
+ * The manifest lists every size once per template, under the same labels, so
+ * an unfiltered lookup by label would find whichever came first. An entry with
+ * no `template` predates the field and is the legacy one.
+ */
+export async function readSizes(template = 'legacy') {
+  return JSON.parse(await fs.readFile(MANIFEST, 'utf8')).sizes.filter(
+    (entry) => (entry.template ?? 'legacy') === template
+  )
+}
+
+/** `--template` on the command line, as the template it asks for. */
+export function templateOf(args) {
+  return args.template ? 'service' : 'legacy'
 }
 
 /**
  * Pick the GeoPackage to upload: a size label from the suite's own ladder, or
  * an explicit path for a file of your own.
  */
-export async function resolveUploadFile({ file, size }) {
+export async function resolveUploadFile({ file, size, template = 'legacy' }) {
   if (file) {
     return path.isAbsolute(file) ? file : path.resolve(process.cwd(), file)
   }
-  const sizes = await readSizes()
+  const sizes = await readSizes(template)
   const wanted = size ?? DEFAULT_SIZE
   const match = sizes.find((entry) => entry.label === wanted)
   if (!match) {
@@ -1254,7 +1297,8 @@ async function resolveOptions(args) {
 
   const count = parseCount(args.count)
 
-  const filePath = await resolveUploadFile(args)
+  const template = templateOf(args)
+  const filePath = await resolveUploadFile({ ...args, template })
   try {
     await fs.access(filePath)
   } catch {
@@ -1311,6 +1355,8 @@ async function resolveOptions(args) {
     shareSession,
     count,
     filePath,
+    template,
+    uploadPage: UPLOAD_PAGES[template],
     headless: Boolean(args.headless),
     keepOpen: Boolean(args['keep-open']),
     staggerMs,
@@ -1325,6 +1371,7 @@ async function resolveOptions(args) {
 function describeRun(opts, layout) {
   info(color('blue', `> ${opts.baseUrl}`))
   info(`  file     ${path.basename(opts.filePath)}`)
+  info(`  page     /projects/<id>/${opts.uploadPage} (${opts.template} template)`)
   info(`  windows  ${opts.count} (${layout.cols}x${layout.rows} grid)`)
   if (!opts.headless) {
     info(
@@ -1575,7 +1622,8 @@ async function runBurst(opts, layout, session, windows) {
           win.page,
           opts.baseUrl,
           opts.filePath,
-          `Burst ${stamp} ${label}`
+          `Burst ${stamp} ${label}`,
+          opts.uploadPage
         )
         info(color('grey', `  ${label} ready - project ${projectId}`))
         return { label, projectId, win, network, ready: true }

@@ -1,28 +1,60 @@
 {
   "sizes": [
     {
+      "template": "legacy",
       "label": "normal",
       "parcels": 80,
       "file": "baseline-normal.gpkg",
       "bytes": 143360
     },
     {
+      "template": "legacy",
       "label": "medium",
       "parcels": 800,
       "file": "baseline-medium.gpkg",
-      "bytes": 720896
+      "bytes": 724992
     },
     {
+      "template": "legacy",
       "label": "large",
       "parcels": 5000,
       "file": "baseline-large.gpkg",
-      "bytes": 4108288
+      "bytes": 4132864
     },
     {
+      "template": "legacy",
       "label": "xlarge",
       "parcels": 12000,
       "file": "baseline-xlarge.gpkg",
-      "bytes": 9732096
+      "bytes": 9785344
+    },
+    {
+      "template": "service",
+      "label": "normal",
+      "parcels": 80,
+      "file": "template-normal.gpkg",
+      "bytes": 192512
+    },
+    {
+      "template": "service",
+      "label": "medium",
+      "parcels": 800,
+      "file": "template-medium.gpkg",
+      "bytes": 909312
+    },
+    {
+      "template": "service",
+      "label": "large",
+      "parcels": 5000,
+      "file": "template-large.gpkg",
+      "bytes": 5025792
+    },
+    {
+      "template": "service",
+      "label": "xlarge",
+      "parcels": 12000,
+      "file": "template-xlarge.gpkg",
+      "bytes": 11919360
     }
   ]
 }

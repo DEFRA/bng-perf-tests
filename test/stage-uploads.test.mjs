@@ -7,9 +7,229 @@
  * before any of that, whether a phase gets a pool at all.
  */
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { test, describe } from 'node:test'
 
-import { editableHabitats, parsePreparedSizes } from '../scripts/stage-uploads.mjs'
+import {
+  describeError,
+  editableHabitats,
+  formatMismatchMessage,
+  isNetworkError,
+  manifestEntry,
+  preflightFailureMessage,
+  parsePreparedSizes,
+  parseUploadTemplate,
+  stagedPostInterventionUploadId,
+  stagedSize,
+  validateEndpointFor
+} from '../scripts/stage-uploads.mjs'
+
+const MANIFEST = JSON.parse(
+  readFileSync(join(import.meta.dirname, '..', 'fixtures', 'manifest.json'))
+)
+
+describe('parseUploadTemplate', () => {
+  test('defaults to the legacy template, so an existing run is unchanged', () => {
+    // entrypoint.sh passes UPLOAD_TEMPLATE whether or not it was set.
+    assert.equal(parseUploadTemplate(undefined), 'legacy')
+    assert.equal(parseUploadTemplate(''), 'legacy')
+  })
+
+  test('reads either template, whatever the case', () => {
+    assert.equal(parseUploadTemplate('legacy'), 'legacy')
+    assert.equal(parseUploadTemplate(' Service '), 'service')
+  })
+
+  test('rejects anything else loudly', () => {
+    // A mistyped value would stage the wrong file and have every validate
+    // refused at the format gate.
+    assert.throws(() => parseUploadTemplate('bng-service'), /UPLOAD_TEMPLATE/)
+    assert.throws(() => parseUploadTemplate('true'), /UPLOAD_TEMPLATE/)
+  })
+})
+
+describe('manifestEntry', () => {
+  test('the committed manifest has all four sizes in both templates', () => {
+    for (const template of ['legacy', 'service']) {
+      for (const [label, parcels] of [
+        ['normal', 80],
+        ['medium', 800],
+        ['large', 5000],
+        ['xlarge', 12000]
+      ]) {
+        const entry = manifestEntry(MANIFEST, { template, label, parcels })
+        assert.ok(entry, `${template} ${label} is in fixtures/manifest.json`)
+        assert.match(
+          entry.file,
+          new RegExp(`^${template === 'service' ? 'template' : 'baseline'}-${label}\\.gpkg$`)
+        )
+      }
+    }
+  })
+
+  test('never hands one template the other template’s file', () => {
+    const manifest = {
+      sizes: [{ template: 'legacy', label: 'normal', parcels: 80, file: 'baseline-normal.gpkg' }]
+    }
+    assert.equal(
+      manifestEntry(manifest, { template: 'service', label: 'normal', parcels: 80 }),
+      null
+    )
+  })
+
+  test('an entry without a template is legacy, as every entry was before', () => {
+    const manifest = { sizes: [{ label: 'normal', parcels: 80, file: 'baseline-normal.gpkg' }] }
+    assert.ok(manifestEntry(manifest, { template: 'legacy', label: 'normal', parcels: 80 }))
+    assert.equal(
+      manifestEntry(manifest, { template: 'service', label: 'normal', parcels: 80 }),
+      null
+    )
+  })
+
+  test('a changed parcel count falls back to generating', () => {
+    assert.equal(
+      manifestEntry(MANIFEST, { template: 'service', label: 'normal', parcels: 81 }),
+      null
+    )
+  })
+})
+
+describe('validateEndpointFor', () => {
+  test('a template file loads through the single-file upload endpoint', () => {
+    // The post-intervention endpoint stores both of a template file's stages.
+    assert.equal(validateEndpointFor('service'), '/post-intervention/validate')
+    assert.equal(validateEndpointFor('legacy'), '/baseline/validate')
+  })
+})
+
+describe('the post-intervention ladder replays the staged upload', () => {
+  test('a template size reuses its own upload', () => {
+    const size = stagedSize({
+      template: 'service',
+      label: 'normal',
+      parcels: 80,
+      bytes: 1,
+      uploadId: 'upload-1'
+    })
+    assert.equal(size.template, 'service')
+    assert.equal(stagedPostInterventionUploadId(size), 'upload-1')
+  })
+
+  test('a legacy size, and a size that lost its template, stages a pair', () => {
+    // Losing the template is what made a template run generate a legacy
+    // post-intervention file and measure the flag refusing it.
+    assert.equal(
+      stagedPostInterventionUploadId(
+        stagedSize({
+          template: 'legacy',
+          label: 'normal',
+          parcels: 80,
+          bytes: 1,
+          uploadId: 'upload-1'
+        })
+      ),
+      null
+    )
+    assert.equal(
+      stagedPostInterventionUploadId({ label: 'normal', uploadId: 'upload-1' }),
+      null
+    )
+  })
+})
+
+describe('formatMismatchMessage', () => {
+  test('a pass is not a mismatch', () => {
+    assert.equal(formatMismatchMessage('service', { valid: true, errors: [] }), null)
+  })
+
+  test('a refused template upload names the flag value the run needs', () => {
+    const message = formatMismatchMessage('service', {
+      valid: false,
+      errors: [{ code: 'GPKG_MISSING_LAYER' }, { code: 'GPKG_MISSING_LAYER' }]
+    })
+    assert.match(message, /GPKG_MISSING_LAYER\)/)
+    assert.match(message, /SERVICE_TEMPLATE_ENABLED=true/)
+  })
+
+  test('a refused legacy upload names the flag value the run needs', () => {
+    const message = formatMismatchMessage('legacy', {
+      valid: false,
+      errors: [{ code: 'LEGACY_TEMPLATE_NOT_ACCEPTED' }]
+    })
+    assert.match(message, /LEGACY_TEMPLATE_NOT_ACCEPTED/)
+    assert.match(message, /SERVICE_TEMPLATE_ENABLED=false/)
+  })
+})
+
+describe('preflightFailureMessage', () => {
+  const endpoint = '/post-intervention/validate'
+
+  test('a 4xx with a JSON body names the flag the run needs', () => {
+    // The format gate refuses with an error status, not a 200, so the verdict
+    // arrives on the thrown error's body. This is the refusal the preflight
+    // exists to turn into a named flag rather than a run of fast failures.
+    const message = preflightFailureMessage('service', endpoint, 'normal', {
+      status: 400,
+      body: { valid: false, errors: [{ code: 'LEGACY_TEMPLATE_NOT_ACCEPTED' }] },
+      message: 'POST x -> 400'
+    })
+    assert.match(message, /SERVICE_TEMPLATE_ENABLED=true/)
+    assert.match(message, /LEGACY_TEMPLATE_NOT_ACCEPTED/)
+  })
+
+  test('a 4xx whose body is not JSON still names the flag', () => {
+    // postJson records a non-JSON body as null, and the hint must survive it.
+    const message = preflightFailureMessage('service', endpoint, 'normal', {
+      status: 400,
+      body: null,
+      message: 'POST x -> 400: <html>bad gateway</html>'
+    })
+    assert.match(message, /SERVICE_TEMPLATE_ENABLED=true/)
+    assert.match(message, /no error code/)
+  })
+
+  test('a 5xx or a network error stays a plain preflight failure', () => {
+    // Neither is a format verdict, so neither should be blamed on the flag.
+    const serverError = preflightFailureMessage('service', endpoint, 'normal', {
+      status: 503,
+      body: { valid: false, errors: [{ code: 'LEGACY_TEMPLATE_NOT_ACCEPTED' }] },
+      message: 'POST x -> 503'
+    })
+    assert.match(serverError, /^preflight \/post-intervention\/validate of normal failed/)
+    assert.doesNotMatch(serverError, /SERVICE_TEMPLATE_ENABLED/)
+
+    const networkError = preflightFailureMessage('legacy', '/baseline/validate', 'normal', {
+      message: 'fetch failed'
+    })
+    assert.match(networkError, /^preflight \/baseline\/validate of normal failed: fetch failed/)
+    assert.doesNotMatch(networkError, /SERVICE_TEMPLATE_ENABLED/)
+  })
+})
+
+describe('a failed fetch', () => {
+  const networkError = () =>
+    new TypeError('fetch failed', {
+      cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' })
+    })
+
+  test('is reported with its cause, not as a bare "fetch failed"', () => {
+    // The large post-intervention upload once failed to stage with nothing
+    // more in the log than "fetch failed".
+    assert.equal(
+      describeError(networkError()),
+      'fetch failed (UND_ERR_SOCKET other side closed)'
+    )
+    assert.equal(describeError(new Error('POST x -> 500: boom')), 'POST x -> 500: boom')
+  })
+
+  test('is retried only when the service never answered', () => {
+    assert.equal(isNetworkError(networkError()), true)
+    // An error status is the service's answer; retrying would hide it.
+    assert.equal(isNetworkError(new Error('POST x -> 500: boom')), false)
+    assert.equal(isNetworkError(new TypeError('x is not a function')), false)
+  })
+})
 
 describe('parsePreparedSizes', () => {
   test('reads label:count pairs', () => {

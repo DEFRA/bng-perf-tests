@@ -7,15 +7,26 @@
  * at 1/2/5: adding a step meant copying a block, and changing a sampler meant
  * changing every copy. This writes them instead, from `ladders.config.mjs`.
  *
- * Two outputs, both COMMITTED:
+ * Three outputs, all COMMITTED:
  *
  *   scenarios/bng-perf.jmx   — between the BEGIN/END GENERATED markers only.
  *                              Everything outside them is hand-written and is
  *                              never touched: the home page, project list,
  *                              probe, size ramp and project-creation groups.
+ *   scenarios/bng-perf-template.jmx
+ *                            — the BNG Service template plan, WHOLLY generated:
+ *                              the hand-written half of bng-perf.jmx with the
+ *                              handful of template-specific values swapped
+ *                              (TEMPLATE_SHELL_EDITS), and the ladders rendered
+ *                              for the template. So the two plans cannot drift:
+ *                              edit bng-perf.jmx and regenerate. Deleted with
+ *                              the legacy template (BMD-1097), when this plan's
+ *                              values become bng-perf.jmx's own.
  *   scenarios/ladders.sh     — the same step lists as a POSIX-sh fragment, so
  *                              entrypoint.sh derives its phase schedule from
  *                              the same source and cannot drift from the plan.
+ *                              One schedule serves both plans: they have the
+ *                              same phases.
  *
  * Committing the output is the call this repo already made for the upload
  * fixtures: the .jmx stays a real file that opens in the JMeter GUI and diffs
@@ -51,10 +62,84 @@ import {
 
 const ROOT = join(import.meta.dirname, '..')
 const JMX_PATH = join(ROOT, 'scenarios', 'bng-perf.jmx')
+const TEMPLATE_JMX_PATH = join(ROOT, 'scenarios', 'bng-perf-template.jmx')
 const LADDERS_SH_PATH = join(ROOT, 'scenarios', 'ladders.sh')
 
 const BEGIN_MARKER = '      <!-- BEGIN GENERATED: ladders — scripts/gen-scenario.mjs, do not edit by hand -->'
 const END_MARKER = '      <!-- END GENERATED: ladders -->'
+
+/**
+ * What differs between the two plans' ladders.
+ *
+ * Every ladder keeps its legacy endpoint in both plans, so their numbers
+ * compare like with like: the revalidate, saturation and mixed slices replay
+ * the size's upload through /baseline/validate, which reads only the Baseline
+ * tables of a template file, and the post-intervention ladder replays it
+ * through /post-intervention/validate. The one change of endpoint is the
+ * upload journey's validate leg: a template user uploads ONE file, through the
+ * post-intervention endpoint, which stores both of its stages — so that is the
+ * journey the template plan measures.
+ */
+const PLAN_MODES = Object.freeze({
+  legacy: Object.freeze({
+    key: 'legacy',
+    jmxPath: JMX_PATH,
+    jmxName: 'scenarios/bng-perf.jmx',
+    journeyValidatePath: '/baseline/validate/${journeyUploadId}'
+  }),
+  service: Object.freeze({
+    key: 'service',
+    jmxPath: TEMPLATE_JMX_PATH,
+    jmxName: 'scenarios/bng-perf-template.jmx',
+    journeyValidatePath: '/post-intervention/validate/${journeyUploadId}'
+  })
+})
+
+const SIZES_FOR_SHELL = ['normal', 'medium', 'large', 'xlarge']
+
+/**
+ * The template plan's hand-written half is bng-perf.jmx's, with these swapped.
+ *
+ * Each `from` must occur EXACTLY ONCE outside the generated block, or the
+ * generator fails: a value that moved or was duplicated in bng-perf.jmx would
+ * otherwise be left un-swapped, and the template plan would quietly upload a
+ * legacy file.
+ *
+ * The `journeyFile_<size>` swaps are what EVERY template run uploads, not a
+ * fallback for the odd bare `jmeter -t` run. entrypoint.sh only passes
+ * `journeyFile_<size>` when JOURNEY_FILE_<SIZE> is set (add_prop drops an empty
+ * value), and it is unset in the normal case — so the plan's own default is the
+ * file the journey posts. These edits are load-bearing, not optional.
+ */
+const TEMPLATE_SHELL_EDITS = Object.freeze([
+  {
+    from: '<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">',
+    to:
+      '<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">\n' +
+      '  <!-- GENERATED from scenarios/bng-perf.jmx by scripts/gen-scenario.mjs — do not edit by hand. -->'
+  },
+  {
+    from: '<TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="bng perf">',
+    to: '<TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="bng perf (BNG Service template)">'
+  },
+  {
+    from: '<stringProp name="TestPlan.comments">The whole BNG performance suite as ONE plan',
+    to:
+      '<stringProp name="TestPlan.comments">THE BNG SERVICE TEMPLATE PLAN. Run it against a service with\n' +
+      'SERVICE_TEMPLATE_ENABLED=true (UPLOAD_TEMPLATE=service). Every upload is ONE file\n' +
+      'per size holding both stages (fixtures/template-&lt;size&gt;.gpkg): the validate ladders\n' +
+      'replay it through /baseline/validate, which reads its Baseline tables, and the\n' +
+      'post-intervention ladder through /post-intervention/validate, with no pair. The\n' +
+      'upload journey validates through /post-intervention/validate, the single-file\n' +
+      'upload a template user makes. Generated from scenarios/bng-perf.jmx, which keeps\n' +
+      'the legacy plan until the legacy template is decommissioned (BMD-1097).\n\n' +
+      'The whole BNG performance suite as ONE plan'
+  },
+  ...SIZES_FOR_SHELL.map((size) => ({
+    from: `\${__P(journeyFile_${size},/opt/perftest/fixtures/baseline-${size}.gpkg)}`,
+    to: `\${__P(journeyFile_${size},/opt/perftest/fixtures/template-${size}.gpkg)}`
+  }))
+])
 
 /** Thread groups sit six spaces in, inside the TestPlan hashTree. */
 const IND = '      '
@@ -513,15 +598,22 @@ function saturateStep(step, defaults) {
  * returned 504s regardless of load — including at a single user. It was
  * measuring the scanner, not the service.
  */
-function journeyStep(step, defaults) {
+function journeyStep(step, defaults, mode) {
   const key = stepKey(step)
   const suffix = stepLabel(step)
+  const templateNote =
+    mode.key === 'service'
+      ? 'The file is the BNG Service template, both stages in one, and the validate\n' +
+        'leg is /post-intervention/validate: the single-file upload a template user\n' +
+        'makes, which stores both stages.\n\n'
+      : ''
   return lines(
     threadGroup({
       name: `Upload journey ${step.size} @ ${step.users} user(s)`,
       key,
       defaults,
       comment:
+        templateNote +
         `The FULL upload journey at ${step.users} concurrent user(s), ${step.size} file —\n` +
         'initiate, multipart POST to the CDP Uploader, then validate, as one closed\n' +
         'loop per user. Every iteration is a real new upload, so the uploader and\n' +
@@ -580,7 +672,7 @@ ${BODY}</IfController>
 ${BODY}<hashTree>`,
     journeyUploadLeg(step, suffix),
     journeyWaitForScanLeg(suffix),
-    journeyValidateLeg(step, suffix),
+    journeyValidateLeg(step, suffix, mode),
     `${BODY}</hashTree>`,
     `${IND}</hashTree>`
   )
@@ -688,11 +780,11 @@ ${UPLOAD_CHILD}</hashTree>
 ${UPLOAD_LEG}</hashTree>`
 }
 
-function journeyValidateLeg(step, suffix) {
+function journeyValidateLeg(step, suffix, mode) {
   const budget = step.size === 'normal' ? 'journeyBudgetMs' : 'journeyLargeBudgetMs'
   return jsonSampler(UPLOAD_LEG, {
     name: `journey ${suffix}: validate`,
-    path: '/baseline/validate/${journeyUploadId}',
+    path: mode.journeyValidatePath,
     method: 'POST',
     body: '{"projectId":"${projectId}"}',
     timeoutProp: 'validateResponseTimeoutMs',
@@ -723,20 +815,27 @@ ${UPLOAD_CHILD}<hashTree/>`,
  * baseline half of the pair into each project first; the two halves share a
  * redline and every feature ref by construction.
  */
-function piStep(step, defaults) {
+function piStep(step, defaults, mode) {
   const key = stepKey(step)
   const label = `post-intervention validate ${stepLabel(step)}`
+  const comment =
+    mode.key === 'service'
+      ? `${step.users} thread(s) validating ONE staged ${step.size} BNG Service template upload\n` +
+        `into ${step.users} prepared project(s) — the same upload the validate ladders\n` +
+        'replay, as the file holds both stages. This endpoint checks both of them\n' +
+        'and the lineage between them, then replaces both of the project\'s documents,\n' +
+        'so it is the heavier of the two validates on the same bytes.'
+      : `${step.users} thread(s) validating ONE staged post-intervention upload into\n` +
+        `${step.users} prepared project(s) — each already holding the ${step.size} baseline the\n` +
+        'upload pairs with. This is the peer of /baseline/validate that no sampler\n' +
+        'in the plan had ever touched, and plausibly the heavier of the two: it\n' +
+        'reconciles against the stored baseline rather than starting from nothing.'
   return lines(
     threadGroup({
       name: `Post-intervention validate ${step.size} @ ${step.users} user(s)`,
       key,
       defaults,
-      comment:
-        `${step.users} thread(s) validating ONE staged post-intervention upload into\n` +
-        `${step.users} prepared project(s) — each already holding the ${step.size} baseline the\n` +
-        'upload pairs with. This is the peer of /baseline/validate that no sampler\n' +
-        'in the plan had ever touched, and plausibly the heavier of the two: it\n' +
-        'reconciles against the stored baseline rather than starting from nothing.'
+      comment
     }),
     `${IND}<hashTree>`,
     backendDefaults(BODY),
@@ -1044,7 +1143,7 @@ function ladderByKey(key) {
   return found
 }
 
-function renderLadders(defaults) {
+function renderLadders(defaults, mode = PLAN_MODES.legacy) {
   const blocks = []
   for (const ladder of LADDERS) {
     const steps = ladderSteps(ladder)
@@ -1054,11 +1153,11 @@ function renderLadders(defaults) {
     blocks.push(`${IND}<!-- ${ladder.title}: ${steps.length} step(s) -->`)
     for (const step of steps) {
       if (ladder.key === 'journey') {
-        blocks.push(journeyStep(step, defaults))
+        blocks.push(journeyStep(step, defaults, mode))
       } else if (ladder.key === 'revalidate') {
         blocks.push(revalidateStep(step, defaults))
       } else if (ladder.key === 'pi') {
-        blocks.push(piStep(step, defaults))
+        blocks.push(piStep(step, defaults, mode))
       } else if (ladder.key === 'edit') {
         blocks.push(editStep(step, { contention: false }, defaults))
       } else if (ladder.key === 'editContention') {
@@ -1245,11 +1344,75 @@ function spliceGenerated(jmx, generated) {
   )
 }
 
+function countOf(haystack, needle) {
+  return haystack.split(needle).length - 1
+}
+
+/**
+ * The template plan, from the legacy plan: its hand-written half with
+ * TEMPLATE_SHELL_EDITS applied, and the ladders rendered for the template.
+ *
+ * The edits apply OUTSIDE the generated block only — the ladders are the
+ * renderer's to vary, by mode — and each must match exactly once there.
+ */
+function renderTemplatePlan(legacyJmx, defaults) {
+  const begin = legacyJmx.indexOf(BEGIN_MARKER)
+  const end = legacyJmx.indexOf(END_MARKER)
+  if (begin === -1 || end === -1 || end < begin) {
+    throw new Error(`could not find the generated-section markers in ${JMX_PATH}`)
+  }
+  let head = legacyJmx.slice(0, begin)
+  let tail = legacyJmx.slice(end)
+  for (const { from, to } of TEMPLATE_SHELL_EDITS) {
+    const inHead = countOf(head, from)
+    const inTail = countOf(tail, from)
+    if (inHead + inTail !== 1) {
+      throw new Error(
+        `template plan: expected exactly one ${JSON.stringify(from)} in the ` +
+          `hand-written part of ${PLAN_MODES.legacy.jmxName}, found ${inHead + inTail}. ` +
+          'Update TEMPLATE_SHELL_EDITS in scripts/gen-scenario.mjs to match the plan.'
+      )
+    }
+    if (inHead === 1) {
+      head = head.replace(from, () => to)
+    } else {
+      tail = tail.replace(from, () => to)
+    }
+  }
+  return spliceGenerated(
+    head + BEGIN_MARKER + tail,
+    renderLadders(defaults, PLAN_MODES.service)
+  )
+}
+
+/**
+ * The template plan with the edits undone and the ladders re-rendered for the
+ * legacy template — which must give back bng-perf.jmx exactly, or the template
+ * plan's hand-written half has drifted from it.
+ */
+function legacyShellOf(templateJmx, defaults) {
+  let jmx = templateJmx
+  for (const { from, to } of TEMPLATE_SHELL_EDITS) {
+    jmx = jmx.split(to).join(from)
+  }
+  return spliceGenerated(jmx, renderLadders(defaults, PLAN_MODES.legacy))
+}
+
+function readOrNull(path) {
+  try {
+    return readFileSync(path, 'utf8')
+  } catch {
+    return null
+  }
+}
+
 function main() {
   const check = process.argv.includes('--check')
   const defaults = defaultsForJmx()
   const jmx = readFileSync(JMX_PATH, 'utf8')
-  const nextJmx = spliceGenerated(jmx, renderLadders(defaults))
+  const nextJmx = spliceGenerated(jmx, renderLadders(defaults, PLAN_MODES.legacy))
+  const templateJmx = readOrNull(TEMPLATE_JMX_PATH)
+  const nextTemplateJmx = renderTemplatePlan(nextJmx, defaults)
   const nextSh = renderLaddersSh()
   const currentSh = (() => {
     try {
@@ -1262,30 +1425,44 @@ function main() {
   if (check) {
     const stale = []
     if (nextJmx !== jmx) {
-      stale.push('scenarios/bng-perf.jmx')
+      stale.push(PLAN_MODES.legacy.jmxName)
+    }
+    if (nextTemplateJmx !== templateJmx) {
+      stale.push(PLAN_MODES.service.jmxName)
     }
     if (nextSh !== currentSh) {
       stale.push('scenarios/ladders.sh')
     }
     if (stale.length > 0) {
       process.stderr.write(
-        `out of date with scenarios/ladders.config.mjs: ${stale.join(', ')}\n` +
-          'Run `npm run gen-scenario` and commit the result.\n'
+        `out of date with scenarios/ladders.config.mjs or ${PLAN_MODES.legacy.jmxName}: ` +
+          `${stale.join(', ')}\n` +
+          'Run `npm run gen-scenario` and commit the result. Edit the hand-written ' +
+          `part of ${PLAN_MODES.legacy.jmxName} only — ${PLAN_MODES.service.jmxName} ` +
+          'is generated from it.\n'
       )
       process.exit(1)
     }
-    process.stdout.write('scenario is up to date with ladders.config.mjs\n')
+    if (legacyShellOf(templateJmx, defaults) !== jmx) {
+      process.stderr.write(
+        `${PLAN_MODES.service.jmxName}'s hand-written part has drifted from ` +
+          `${PLAN_MODES.legacy.jmxName}. Run \`npm run gen-scenario\`.\n`
+      )
+      process.exit(1)
+    }
+    process.stdout.write('scenarios are up to date with ladders.config.mjs and each other\n')
     return
   }
 
   writeFileSync(JMX_PATH, nextJmx)
+  writeFileSync(TEMPLATE_JMX_PATH, nextTemplateJmx)
   writeFileSync(LADDERS_SH_PATH, nextSh)
 
   const stepCount = LADDERS.reduce((n, l) => n + ladderSteps(l).length, 0)
   const minutes = (defaults.endsAt / SECONDS_PER_MINUTE).toFixed(1)
   process.stdout.write(
     `wrote ${stepCount} ladder step(s) + the fetch ramp and mixed workload into\n` +
-      `  scenarios/bng-perf.jmx\n  scenarios/ladders.sh\n` +
+      `  ${PLAN_MODES.legacy.jmxName}\n  ${PLAN_MODES.service.jmxName}\n  scenarios/ladders.sh\n` +
       `defaults baked in are the '${DEFAULT_PROFILE}' profile — a direct ` +
       `\`jmeter -t\` run ends at ~${minutes} min\n`
   )
@@ -1293,4 +1470,12 @@ function main() {
 
 main()
 
-export { renderLadders, renderLaddersSh, defaultsForJmx, ladderByKey }
+export {
+  renderLadders,
+  renderLaddersSh,
+  renderTemplatePlan,
+  defaultsForJmx,
+  ladderByKey,
+  PLAN_MODES,
+  TEMPLATE_SHELL_EDITS
+}

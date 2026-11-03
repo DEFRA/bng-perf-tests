@@ -83,6 +83,11 @@ services:
       # PERF_DUMP_SCHEDULE=true shows a schedule without running it, and the
       # per-phase env knobs in the README narrow a run.
       PERF_DUMP_SCHEDULE: ${PERF_DUMP_SCHEDULE:-}
+      # legacy (default) or service — the BNG Service template, which needs the
+      # stack running with SERVICE_TEMPLATE_ENABLED=true:
+      #
+      #   UPLOAD_TEMPLATE=service docker compose up --build
+      UPLOAD_TEMPLATE: ${UPLOAD_TEMPLATE:-legacy}
     networks:
       - performance-tests
 
