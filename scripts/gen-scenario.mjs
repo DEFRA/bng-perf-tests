@@ -103,9 +103,13 @@ const SIZES_FOR_SHELL = ['normal', 'medium', 'large', 'xlarge']
  * Each `from` must occur EXACTLY ONCE outside the generated block, or the
  * generator fails: a value that moved or was duplicated in bng-perf.jmx would
  * otherwise be left un-swapped, and the template plan would quietly upload a
- * legacy file. Keep the list to values a template run cannot get any other
- * way — entrypoint.sh already passes every journeyFile_<size>, so these are the
- * fallbacks a bare `jmeter -t` run of the template plan sees.
+ * legacy file.
+ *
+ * The `journeyFile_<size>` swaps are what EVERY template run uploads, not a
+ * fallback for the odd bare `jmeter -t` run. entrypoint.sh only passes
+ * `journeyFile_<size>` when JOURNEY_FILE_<SIZE> is set (add_prop drops an empty
+ * value), and it is unset in the normal case — so the plan's own default is the
+ * file the journey posts. These edits are load-bearing, not optional.
  */
 const TEMPLATE_SHELL_EDITS = Object.freeze([
   {

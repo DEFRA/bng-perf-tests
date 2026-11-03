@@ -277,6 +277,16 @@ case "${UPLOAD_TEMPLATE}" in
   legacy)
     FIXTURE_PREFIX=baseline
     TEMPLATE_FLAG_REQUIRED="SERVICE_TEMPLATE_ENABLED=false"
+    # The template plan's baked-in fallback is fixtures/template-<size>.gpkg,
+    # which it uploads through /post-intervention/validate. Staging would still
+    # preflight the legacy file through /baseline/validate and pass on a flag-off
+    # service, and the journey would then send the template file and have every
+    # validate rejected — the fast-rejection result the preflight exists to stop.
+    # So the template plan is not a legal target for a legacy run.
+    if [ "${SCENARIO}" = "bng-perf-template" ]; then
+      echo "ERROR: scenarios/bng-perf-template.jmx uploads the BNG Service template, so it needs UPLOAD_TEMPLATE=service (the target must have SERVICE_TEMPLATE_ENABLED=true)." >&2
+      exit 1
+    fi
     ;;
   service)
     FIXTURE_PREFIX=template

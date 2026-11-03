@@ -241,7 +241,17 @@ async function postJson(url, body) {
   })
   const text = await res.text()
   if (res.status >= HTTP_BAD_REQUEST) {
-    throw new Error(`POST ${url} -> ${res.status}: ${text.slice(0, 300)}`)
+    // The body rides on the error so a caller can read a refusal the service
+    // expressed as a 4xx — the preflight does, to name the flag rather than
+    // report a bare status. A body that is not JSON parses as null.
+    const error = new Error(`POST ${url} -> ${res.status}: ${text.slice(0, 300)}`)
+    error.status = res.status
+    try {
+      error.body = text ? JSON.parse(text) : null
+    } catch {
+      error.body = null
+    }
+    throw error
   }
   return text ? JSON.parse(text) : null
 }
@@ -641,13 +651,6 @@ async function stagePostIntervention({ label, parcels }) {
 }
 
 /**
- * The endpoint that loads a whole upload into a project: the baseline one for
- * a legacy baseline, the post-intervention one for a BNG Service template file
- * (which stores both of its stages from there).
- *
- * @param {string} template
- */
-/**
  * A staged size, with the template it was staged as kept on it.
  *
  * @param {{ template: string, label: string, parcels: number, bytes: number, uploadId: string }} size
@@ -677,6 +680,13 @@ export function stagedPostInterventionUploadId(size) {
   return size?.template === SERVICE_TEMPLATE ? size.uploadId : null
 }
 
+/**
+ * The endpoint that loads a whole upload into a project: the baseline one for
+ * a legacy baseline, the post-intervention one for a BNG Service template file
+ * (which stores both of its stages from there).
+ *
+ * @param {string} template
+ */
 export function validateEndpointFor(template) {
   return template === SERVICE_TEMPLATE
     ? '/post-intervention/validate'
@@ -723,7 +733,19 @@ async function preflightTemplate(template, { label, uploadId }) {
   try {
     result = await postJson(`${API_BASE_URL}${endpoint}/${uploadId}`, {})
   } catch (err) {
-    throw new Error(`preflight ${endpoint} of ${label} failed: ${describeError(err)}`)
+    // A 4xx is the service refusing the file, and the format gate refuses with
+    // an error status rather than a 200 — so the verdict is in the body, and
+    // naming the flag here is the whole point of the preflight. Anything else
+    // (a network failure, a 5xx) is not a format verdict and stays generic.
+    const mismatch =
+      err.status >= HTTP_BAD_REQUEST && err.status < 500
+        ? formatMismatchMessage(template, err.body)
+        : null
+    throw new Error(
+      mismatch
+        ? `${mismatch} (${describeError(err)})`
+        : `preflight ${endpoint} of ${label} failed: ${describeError(err)}`
+    )
   }
   const mismatch = formatMismatchMessage(template, result)
   if (mismatch) {
