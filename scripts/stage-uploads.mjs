@@ -727,25 +727,38 @@ export function formatMismatchMessage(template, result) {
  * that catches the run and the service disagreeing about the template, which
  * would otherwise surface as a plan full of refused validates.
  */
+/**
+ * What a preflight says when the validate call threw.
+ *
+ * A 4xx is the service refusing the file, and the format gate refuses with an
+ * error status rather than a 200, so the verdict is in the body and naming the
+ * flag is the whole point. A body that did not parse (`err.body` null) still
+ * names the flag, only without an error code. A 5xx or a network error is not a
+ * format verdict and stays a plain preflight failure.
+ *
+ * @param {string} template the run's UPLOAD_TEMPLATE
+ * @param {string} endpoint the validate path the preflight called
+ * @param {string} label the size that was preflighted
+ * @param {{ status?: number, body?: { valid?: boolean, errors?: object[] } | null, message?: string }} err
+ * @returns {string}
+ */
+export function preflightFailureMessage(template, endpoint, label, err) {
+  const mismatch =
+    err.status >= HTTP_BAD_REQUEST && err.status < 500
+      ? formatMismatchMessage(template, err.body)
+      : null
+  return mismatch
+    ? `${mismatch} (${describeError(err)})`
+    : `preflight ${endpoint} of ${label} failed: ${describeError(err)}`
+}
+
 async function preflightTemplate(template, { label, uploadId }) {
   const endpoint = validateEndpointFor(template)
   let result
   try {
     result = await postJson(`${API_BASE_URL}${endpoint}/${uploadId}`, {})
   } catch (err) {
-    // A 4xx is the service refusing the file, and the format gate refuses with
-    // an error status rather than a 200 — so the verdict is in the body, and
-    // naming the flag here is the whole point of the preflight. Anything else
-    // (a network failure, a 5xx) is not a format verdict and stays generic.
-    const mismatch =
-      err.status >= HTTP_BAD_REQUEST && err.status < 500
-        ? formatMismatchMessage(template, err.body)
-        : null
-    throw new Error(
-      mismatch
-        ? `${mismatch} (${describeError(err)})`
-        : `preflight ${endpoint} of ${label} failed: ${describeError(err)}`
-    )
+    throw new Error(preflightFailureMessage(template, endpoint, label, err))
   }
   const mismatch = formatMismatchMessage(template, result)
   if (mismatch) {

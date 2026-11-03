@@ -17,6 +17,7 @@ import {
   formatMismatchMessage,
   isNetworkError,
   manifestEntry,
+  preflightFailureMessage,
   parsePreparedSizes,
   parseUploadTemplate,
   stagedPostInterventionUploadId,
@@ -158,6 +159,51 @@ describe('formatMismatchMessage', () => {
     })
     assert.match(message, /LEGACY_TEMPLATE_NOT_ACCEPTED/)
     assert.match(message, /SERVICE_TEMPLATE_ENABLED=false/)
+  })
+})
+
+describe('preflightFailureMessage', () => {
+  const endpoint = '/post-intervention/validate'
+
+  test('a 4xx with a JSON body names the flag the run needs', () => {
+    // The format gate refuses with an error status, not a 200, so the verdict
+    // arrives on the thrown error's body. This is the refusal the preflight
+    // exists to turn into a named flag rather than a run of fast failures.
+    const message = preflightFailureMessage('service', endpoint, 'normal', {
+      status: 400,
+      body: { valid: false, errors: [{ code: 'LEGACY_TEMPLATE_NOT_ACCEPTED' }] },
+      message: 'POST x -> 400'
+    })
+    assert.match(message, /SERVICE_TEMPLATE_ENABLED=true/)
+    assert.match(message, /LEGACY_TEMPLATE_NOT_ACCEPTED/)
+  })
+
+  test('a 4xx whose body is not JSON still names the flag', () => {
+    // postJson records a non-JSON body as null, and the hint must survive it.
+    const message = preflightFailureMessage('service', endpoint, 'normal', {
+      status: 400,
+      body: null,
+      message: 'POST x -> 400: <html>bad gateway</html>'
+    })
+    assert.match(message, /SERVICE_TEMPLATE_ENABLED=true/)
+    assert.match(message, /no error code/)
+  })
+
+  test('a 5xx or a network error stays a plain preflight failure', () => {
+    // Neither is a format verdict, so neither should be blamed on the flag.
+    const serverError = preflightFailureMessage('service', endpoint, 'normal', {
+      status: 503,
+      body: { valid: false, errors: [{ code: 'LEGACY_TEMPLATE_NOT_ACCEPTED' }] },
+      message: 'POST x -> 503'
+    })
+    assert.match(serverError, /^preflight \/post-intervention\/validate of normal failed/)
+    assert.doesNotMatch(serverError, /SERVICE_TEMPLATE_ENABLED/)
+
+    const networkError = preflightFailureMessage('legacy', '/baseline/validate', 'normal', {
+      message: 'fetch failed'
+    })
+    assert.match(networkError, /^preflight \/baseline\/validate of normal failed: fetch failed/)
+    assert.doesNotMatch(networkError, /SERVICE_TEMPLATE_ENABLED/)
   })
 })
 

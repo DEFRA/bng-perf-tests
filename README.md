@@ -596,7 +596,7 @@ environment too.
 
 **A mismatch fails the run at staging, not in the report.** The suite cannot read
 the service's flag, so once the uploads are staged `stage-uploads.mjs` validates
-the first one — before building any project pool or starting JMeter — and stops,
+the first one — before preparing any project pool or starting JMeter — and stops,
 naming the flag value the target needs, if the
 format gate refuses it (`LEGACY_TEMPLATE_NOT_ACCEPTED` one way, a missing
 legacy layer the other). Without that, every validate in the run would be a fast
