@@ -722,12 +722,6 @@ export function formatMismatchMessage(template, result) {
 }
 
 /**
- * Validate the first staged upload once, without a project, before anything
- * is built on it. Cheap — it is the smallest size — and it is the one check
- * that catches the run and the service disagreeing about the template, which
- * would otherwise surface as a plan full of refused validates.
- */
-/**
  * What a preflight says when the validate call threw.
  *
  * A 4xx is the service refusing the file, and the format gate refuses with an
@@ -752,6 +746,12 @@ export function preflightFailureMessage(template, endpoint, label, err) {
     : `preflight ${endpoint} of ${label} failed: ${describeError(err)}`
 }
 
+/**
+ * Validate the first staged upload once, without a project, before anything
+ * is built on it. Cheap — it is the smallest size — and it is the one check
+ * that catches the run and the service disagreeing about the template, which
+ * would otherwise surface as a plan full of refused validates.
+ */
 async function preflightTemplate(template, { label, uploadId }) {
   const endpoint = validateEndpointFor(template)
   let result
