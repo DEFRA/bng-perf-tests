@@ -722,6 +722,27 @@ export async function signIn(page, baseUrl, username, password, provider) {
 }
 
 /**
+ * The project id from a dashboard row link.
+ *
+ * The list used to link to `/add-project-details/<id>`. It now links to
+ * `/projects/<id>/project-summary`, so the last segment is the page name and
+ * the id is the one before it. Taking the last segment sent every window to
+ * `/projects/project-summary/...`, which the frontend renders and then rejects.
+ *
+ * @param {string|null} href
+ * @returns {string}
+ */
+export function projectIdFromHref(href) {
+  const segments = (href ?? '').split('?')[0].split('/').filter(Boolean)
+  const summaryAt = segments.lastIndexOf('project-summary')
+  const id = summaryAt > 0 ? segments[summaryAt - 1] : segments.at(-1)
+  if (!id) {
+    throw new Error(`Could not read a project id from "${href}"`)
+  }
+  return id
+}
+
+/**
  * Let a human sign in, once, in a window they can see.
  *
  * The reliable answer to MFA, to a provider whose pages have been redesigned,
@@ -776,16 +797,12 @@ export async function stageUpload(
 
   // Creating a project returns to the dashboard with the new project listed —
   // it does NOT go on to the project itself. The id is only available from that
-  // row's link, whose href is /add-project-details/<id>, which is where
-  // setupProject reads it from too.
+  // row's link.
   await page.waitForURL(/\/manage-projects/, { timeout: SETUP_TIMEOUT })
   const href = await page
     .getByRole('link', { name: label })
     .getAttribute('href')
-  const projectId = href?.split('/').pop()
-  if (!projectId) {
-    throw new Error(`Could not read a project id from "${href}"`)
-  }
+  const projectId = projectIdFromHref(href)
 
   await page.goto(`${baseUrl}/projects/${projectId}/${uploadPage}`, {
     waitUntil: 'domcontentloaded',

@@ -19,6 +19,7 @@ import {
   UPLOAD_PAGES,
   classifyMessage,
   parseArgs,
+  projectIdFromHref,
   parseCols,
   parseCount,
   parseNonNegative,
@@ -30,6 +31,26 @@ import {
 } from '../scripts/concurrent-uploads.mjs'
 
 const SCREEN = { width: 1920, height: 1080 }
+
+describe('projectIdFromHref — the dashboard row link', () => {
+  test('reads the id from /projects/<id>/project-summary', () => {
+    assert.equal(
+      projectIdFromHref('/projects/3f1c0a2e-4b6d-4e8a-9c1f-2d7b5a6e8c90/project-summary'),
+      '3f1c0a2e-4b6d-4e8a-9c1f-2d7b5a6e8c90'
+    )
+  })
+
+  test('still reads the id when the link ends with it', () => {
+    assert.equal(
+      projectIdFromHref('/add-project-details/3f1c0a2e-4b6d-4e8a-9c1f-2d7b5a6e8c90'),
+      '3f1c0a2e-4b6d-4e8a-9c1f-2d7b5a6e8c90'
+    )
+  })
+
+  test('refuses a link with no id', () => {
+    assert.throws(() => projectIdFromHref(''), /Could not read a project id/)
+  })
+})
 
 describe('parseCount — the window cap', () => {
   test('defaults when nothing is asked for', () => {
