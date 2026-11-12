@@ -860,6 +860,8 @@ run is meaningless.
 | `MIX_THREADS`                    | `8`                                            | Threads on the mixed workload.                                  |
 | `MIX_{LIST,FETCH,EDIT,VALIDATE}_PERCENT` | `40/25/25/10`                          | The mix, as percent of iterations. Warns if they do not total 100. |
 | `MIX_THINK_MS`                   | `500`                                          | Pacing between mixed-workload iterations.                       |
+| `RATE_LIMIT_VALIDATE_UPLOAD_ID`  | unset → a fake uploadId                        | `ratelimit` only: the uploadId the validate bursts send.        |
+| `RATE_LIMIT_TILE_PATH`           | unset → `/os-tiles/capabilities`               | `ratelimit` only: the path the tile bursts send.                |
 | `JOURNEY_FILE_{NORMAL,MEDIUM,LARGE,XLARGE}` | the committed fixture               | The file that size's journey ladder uploads.                    |
 | `JOURNEY_BUDGET_MS`              | `35000`                                        | Budget for the journey's validate leg — validation only, now the scan wait has its own leg. See below. |
 | `JOURNEY_LARGE_BUDGET_MS`        | `60000`                                        | The same, for the non-`normal` sizes.                         |
@@ -1337,7 +1339,8 @@ For each route, two phases:
 - **all users over the limit** — more threads than the limit needs, each sending no
   more than its own limit, so only the all-users limit can refuse them. The sampler
   label says how many must be refused (`expect N of M refused`), and its error column
-  is that count.
+  is that count. The backend gives back one all-users count for each 503, so each 503
+  lowers the expected refused count by one.
 
 All the "each user" phases run first. A window starts at a route's first request and
 does not slide, so a route's "all users" phase must start after the count of its "each
@@ -1352,12 +1355,15 @@ sample; a 429 or another 5xx does.
   toward its limits before it validates it, so each one counts, and the route answers
   400 in milliseconds. 41 real validations in sequence take longer than the one-minute
   window they must fit in; validation cost is what `standard` measures.
-  `-JrateLimitValidateUploadId=<uuid>` sends a real upload instead.
+  `RATE_LIMIT_VALIDATE_UPLOAD_ID=<uuid>` (`-JrateLimitValidateUploadId` for a direct
+  `jmeter` run) sends a real upload instead.
 - The tile bursts use `/os-tiles/capabilities` (set
-  `-JrateLimitTilePath=/os-tiles/{z}/{col}/{row}.png` for a tile). The routes exist
-  only where the backend has an OS key, so elsewhere they answer 404.
+  `RATE_LIMIT_TILE_PATH=/os-tiles/{z}/{col}/{row}.png`, or `-JrateLimitTilePath`, for a
+  tile). The routes exist only where the backend has an OS key, so elsewhere they
+  answer 404.
 - The profile stages nothing by default, because no burst needs a staged upload.
-  `STAGE_UPLOADS=true` stages as the other profiles do.
+  `STAGE_UPLOADS=true` stages as the other profiles do, but the bursts do not use
+  what it stages: only `RATE_LIMIT_VALIDATE_UPLOAD_ID` sends a real upload.
 
 **What can go wrong.** A user's burst is sent in sequence, so its last request must
 arrive inside the window its first one opened. Every burst gets the whole one-minute

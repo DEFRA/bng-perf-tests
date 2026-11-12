@@ -1189,6 +1189,11 @@ add_prop mixEditPercent "${MIX_EDIT_PERCENT}"
 add_prop mixValidatePercent "${MIX_VALIDATE_PERCENT}"
 add_prop mixThinkMs "${MIX_THINK_MS}"
 
+# The rate-limit bursts' targets. Unset, the plan's own defaults win: a fake
+# uploadId for the validate bursts, /os-tiles/capabilities for the tile bursts.
+add_prop rateLimitValidateUploadId "${RATE_LIMIT_VALIDATE_UPLOAD_ID}"
+add_prop rateLimitTilePath "${RATE_LIMIT_TILE_PATH}"
+
 set -x
 if ! stage_uploads "${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${BACKEND_PORT}"; then
   echo "ERROR: upload staging failed — cannot run ${SCENARIO}" >&2

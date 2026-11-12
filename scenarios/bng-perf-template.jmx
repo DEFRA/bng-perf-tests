@@ -12824,7 +12824,9 @@ the refusal moves to the limit times the number of copies.</stringProp>
         <stringProp name="TestPlan.comments">8 threads, each its own stub user, each send 8
 request(s): 64 in all against a limit of 60 for all users.
 The backend must refuse exactly 4 of them with 429 (one copy of
-the backend), and none of the rest. Read the count off the error column.</stringProp>
+the backend), and none of the rest. Read the count off the error column.
+Each 503 lowers the expected refused count by one: the backend gives back
+its all-users count.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_rateLimit_uploadInitiate_allUsers,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -12934,7 +12936,9 @@ the backend), and none of the rest. Read the count off the error column.</string
         <stringProp name="TestPlan.comments">9 threads, each its own stub user, each send 15
 request(s): 135 in all against a limit of 120 for all users.
 The backend must refuse exactly 15 of them with 429 (one copy of
-the backend), and none of the rest. Read the count off the error column.</stringProp>
+the backend), and none of the rest. Read the count off the error column.
+Each 503 lowers the expected refused count by one: the backend gives back
+its all-users count.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_rateLimit_baselineValidate_allUsers,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -13044,7 +13048,9 @@ the backend), and none of the rest. Read the count off the error column.</string
         <stringProp name="TestPlan.comments">9 threads, each its own stub user, each send 15
 request(s): 135 in all against a limit of 120 for all users.
 The backend must refuse exactly 15 of them with 429 (one copy of
-the backend), and none of the rest. Read the count off the error column.</stringProp>
+the backend), and none of the rest. Read the count off the error column.
+Each 503 lowers the expected refused count by one: the backend gives back
+its all-users count.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_rateLimit_piValidate_allUsers,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -13154,7 +13160,9 @@ the backend), and none of the rest. Read the count off the error column.</string
         <stringProp name="TestPlan.comments">7 threads, each its own stub user, each send 3
 request(s): 21 in all against a limit of 20 for all users.
 The backend must refuse exactly 1 of them with 429 (one copy of
-the backend), and none of the rest. Read the count off the error column.</stringProp>
+the backend), and none of the rest. Read the count off the error column.
+Each 503 lowers the expected refused count by one: the backend gives back
+its all-users count.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_rateLimit_report_allUsers,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
@@ -13257,7 +13265,9 @@ the backend), and none of the rest. Read the count off the error column.</string
         <stringProp name="TestPlan.comments">9 threads, each its own stub user, each send 375
 request(s): 3375 in all against a limit of 3000 for all users.
 The backend must refuse exactly 375 of them with 429 (one copy of
-the backend), and none of the rest. Read the count off the error column.</stringProp>
+the backend), and none of the rest. Read the count off the error column.
+Each 503 lowers the expected refused count by one: the backend gives back
+its all-users count.</stringProp>
         <stringProp name="ThreadGroup.num_threads">${__P(users_rateLimit_osTiles_allUsers,0)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>

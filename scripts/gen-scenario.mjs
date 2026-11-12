@@ -1361,7 +1361,9 @@ function rateLimitAllUsersStep(route, defaults) {
         `${burst.threads} threads, each its own stub user, each send ${burst.requestsPerThread}\n` +
         `request(s): ${burst.total} in all against a limit of ${route.allUsersLimit} for all users.\n` +
         `The backend must refuse exactly ${burst.refused} of them with 429 (one copy of\n` +
-        'the backend), and none of the rest. Read the count off the error column.'
+        'the backend), and none of the rest. Read the count off the error column.\n' +
+        'Each 503 lowers the expected refused count by one: the backend gives back\n' +
+        'its all-users count.'
     }),
     `${IND}<hashTree>`,
     rateLimitSetup(),
