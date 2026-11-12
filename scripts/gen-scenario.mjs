@@ -46,13 +46,19 @@ import {
   MIXED_THREADS,
   MIX_DEFAULTS,
   PROFILES,
+  RATE_LIMITED_ROUTES,
+  RATE_LIMIT_USER_PHASE_THREADS,
   SETUP_ALLOWANCE_SECONDS,
   SIZE_LABELS,
+  allUsersBurst,
   budgetCheck,
   generatedBlockStartSeconds,
   ladderSteps,
   phasesBeyondCutoff,
   phasesWithinCutoff,
+  rateLimitKey,
+  rateLimitPhases,
+  rateLimitUserCount,
   runSeconds,
   scheduleFrom,
   sizeRampWindowSeconds,
@@ -212,7 +218,7 @@ ${indent}<hashTree/>`
  * Auth headers. `json` adds Content-Type; the journey's file leg must NOT have
  * one set here, because the multipart sampler has to write its own boundary.
  */
-function authHeaders(indent, { json = true } = {}) {
+function authHeaders(indent, { json = true, tokenVar = 'bearerToken' } = {}) {
   const contentType = json
     ? `${indent}    <elementProp name="" elementType="Header">
 ${indent}      <stringProp name="Header.name">Content-Type</stringProp>
@@ -226,7 +232,7 @@ ${indent}    </elementProp>\n`
 ${indent}  <collectionProp name="HeaderManager.headers">
 ${indent}    <elementProp name="" elementType="Header">
 ${indent}      <stringProp name="Header.name">Authorization</stringProp>
-${indent}      <stringProp name="Header.value">Bearer \${bearerToken}</stringProp>
+${indent}      <stringProp name="Header.value">Bearer \${${tokenVar}}</stringProp>
 ${indent}    </elementProp>
 ${contentType}${indent}    <elementProp name="" elementType="Header">
 ${indent}      <stringProp name="Header.name">Accept</stringProp>
@@ -290,6 +296,10 @@ const PREPARED_CSV_IS_QUOTED = true
 const ASSERT_RESPONSE_CODE = 8
 const ASSERT_SUBSTRING = 2
 const ASSERT_MATCHES = 1
+// Assertion.test_type is a bit set: NOT (4) inverts EQUALS (8) or MATCHES (1).
+const ASSERT_NOT = 4
+const ASSERT_NOT_EQUALS = ASSERT_NOT + ASSERT_RESPONSE_CODE
+const ASSERT_NOT_MATCHES = ASSERT_NOT + ASSERT_MATCHES
 
 const JAVA_HASH_MULTIPLIER = 31
 const INT32 = 32
@@ -313,7 +323,10 @@ function javaHash(value) {
   return String(BigInt.asIntN(INT32, BigInt(hash)))
 }
 
-function responseAssertion(indent, { name, field, testType, values }) {
+function responseAssertion(
+  indent,
+  { name, field, testType, values, assumeSuccess = false }
+) {
   const items = values
     .map(
       (v) => `${indent}    <stringProp name="${javaHash(v)}">${xml(v)}</stringProp>`
@@ -324,7 +337,7 @@ ${indent}  <collectionProp name="Asserion.test_strings">
 ${items}
 ${indent}  </collectionProp>
 ${indent}  <stringProp name="Assertion.test_field">${field}</stringProp>
-${indent}  <boolProp name="Assertion.assume_success">false</boolProp>
+${indent}  <boolProp name="Assertion.assume_success">${assumeSuccess}</boolProp>
 ${indent}  <intProp name="Assertion.test_type">${testType}</intProp>
 ${indent}</ResponseAssertion>
 ${indent}<hashTree/>`
@@ -1133,6 +1146,253 @@ ${BODY}<hashTree/>`,
   )
 }
 
+// ── Rate-limit bursts ───────────────────────────────────────────────────────
+
+/**
+ * The request each rate-limited route is burst with.
+ *
+ * The upload start and the report do the route's real work: the report reads
+ * the thread's own project, from its row of the user pool.
+ *
+ * The validate bursts send an uploadId that is not one. The backend counts a
+ * request toward its limits before it validates the request: hapi-rate-limit
+ * counts at `onPostAuth`, and hapi validates the route's params (a UUID) after
+ * that hook. So each one counts, and the route answers 400 in milliseconds
+ * rather than validating a file for seconds: 41 real validations in sequence
+ * would not fit inside the one-minute window they have to.
+ * `-JrateLimitValidateUploadId=<uuid>` sends a real staged upload instead,
+ * where validation is fast enough for that.
+ *
+ * The tile route defaults to the capabilities document: it is rate-limited
+ * like the tiles, needs no grid coordinate and spends no OS quota.
+ */
+const RATE_LIMIT_REQUESTS = {
+  uploadInitiate: {
+    method: 'POST',
+    path: '/upload/initiate',
+    body: '{"redirect":"/done","s3Bucket":"${uploadS3Bucket}","s3Path":"baseline/"}',
+    timeoutProp: 'initiateResponseTimeoutMs',
+    timeoutDefault: TIMEOUT_DEFAULTS.initiate
+  },
+  baselineValidate: {
+    method: 'POST',
+    path: '/baseline/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}',
+    body: '{}',
+    timeoutProp: 'validateResponseTimeoutMs',
+    timeoutDefault: TIMEOUT_DEFAULTS.validate
+  },
+  piValidate: {
+    method: 'POST',
+    path: '/post-intervention/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}',
+    body: '{}',
+    timeoutProp: 'validateResponseTimeoutMs',
+    timeoutDefault: TIMEOUT_DEFAULTS.validate
+  },
+  report: {
+    method: 'GET',
+    path: '/projects/${rateLimitProjectId}/report.pdf'
+  },
+  osTiles: {
+    method: 'GET',
+    path: '${__P(rateLimitTilePath,/os-tiles/capabilities)}'
+  }
+}
+
+/** One request to a rate-limited route, with the assertions in `children`. */
+function rateLimitSampler(indent, route, name, children) {
+  const request = RATE_LIMIT_REQUESTS[route.key]
+  if (request.method === 'GET') {
+    return getSampler(indent, { name, path: request.path, children })
+  }
+  return jsonSampler(indent, { name, ...request, children })
+}
+
+/**
+ * Under a limit, the only answers that fail the sample are a refusal, a
+ * server error, or no HTTP answer at all. A 503 is the validator being busy, which is its own load shed
+ * and not a failure here; a 4xx is the route's own answer to the request.
+ * `assume_success` lets the assertions decide, so a sampler's error rate
+ * counts exactly the requests a limit refused wrongly.
+ */
+function notRefused(indent) {
+  return lines(
+    responseAssertion(indent, {
+      name: 'Not refused by a rate limit (not 429)',
+      field: 'Assertion.response_code',
+      testType: ASSERT_NOT_EQUALS,
+      values: ['429'],
+      assumeSuccess: true
+    }),
+    responseAssertion(indent, {
+      name: 'No server error (503 busy is allowed)',
+      field: 'Assertion.response_code',
+      testType: ASSERT_NOT_MATCHES,
+      values: ['50[0-24-9]|5[1-9][0-9]']
+    }),
+    // A timeout or a refused connection has no HTTP status — JMeter reports a
+    // "Non HTTP response code" — and would otherwise pass both checks above.
+    responseAssertion(indent, {
+      name: 'An HTTP answer (no timeout or connection failure)',
+      field: 'Assertion.response_code',
+      testType: ASSERT_MATCHES,
+      values: ['[0-9]{3}']
+    })
+  )
+}
+
+/** Over a limit: a 429, and a Retry-After header that says how long to wait. */
+function refused(indent) {
+  return lines(
+    responseAssertion(indent, {
+      name: 'Refused by the rate limit (429)',
+      field: 'Assertion.response_code',
+      testType: ASSERT_RESPONSE_CODE,
+      values: ['429'],
+      assumeSuccess: true
+    }),
+    responseAssertion(indent, {
+      name: 'Retry-After in seconds',
+      field: 'Assertion.response_headers',
+      testType: ASSERT_SUBSTRING,
+      values: ['(?i)retry-after: *[0-9]+']
+    })
+  )
+}
+
+function loopController(indent, { name, loops, child }) {
+  return lines(
+    `${indent}<LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="${xml(name)}">
+${indent}  <boolProp name="LoopController.continue_forever">false</boolProp>
+${indent}  <stringProp name="LoopController.loops">${loops}</stringProp>
+${indent}</LoopController>
+${indent}<hashTree>`,
+    child,
+    `${indent}</hashTree>`
+  )
+}
+
+/**
+ * The setup every rate-limit thread group shares: the backend, and a row of
+ * the user pool for each thread, so each thread is its own stub user with its
+ * own token and its own project. The pool has a row for every thread of the
+ * widest phase and the cursor is shared, so no two threads of a phase share a
+ * user.
+ */
+function rateLimitSetup() {
+  return lines(
+    backendDefaults(BODY),
+    csvDataSet(BODY, {
+      name: 'Rate-limit user pool (one stub user per thread)',
+      fileProp: 'rateLimitUsersCsv',
+      fileDefault: '/opt/perftest/stage/rate-limit-users.csv',
+      variables: 'rateLimitToken,rateLimitProjectId'
+    }),
+    authHeaders(BODY, { tokenVar: 'rateLimitToken' })
+  )
+}
+
+/**
+ * Each user over its own limit: every thread sends the limit, which must all
+ * pass, then one more, which must be refused with a Retry-After.
+ *
+ * The threads send in sequence, so the last request must arrive inside the
+ * window the first one opened; a test holds every burst to that. Each label
+ * states how many samples it must have, so a burst the JMeter window cut
+ * short shows as missing samples rather than as a pass.
+ */
+function rateLimitUserStep(route, defaults) {
+  const key = rateLimitKey(route, 'user')
+  const threads = RATE_LIMIT_USER_PHASE_THREADS
+  return lines(
+    threadGroup({
+      name: `Rate limit ${route.title}: each user over the limit`,
+      key,
+      defaults,
+      loops: 1,
+      comment:
+        `Each thread is its own stub user. It sends ${route.userLimit} requests, the\n` +
+        `limit for each user, which must not be refused, then 1 more, which must be\n` +
+        'refused with 429 and a Retry-After header.\n\n' +
+        'Assumes ONE copy of the backend: each copy counts on its own, so with more\n' +
+        'the refusal moves to the limit times the number of copies.'
+    }),
+    `${IND}<hashTree>`,
+    rateLimitSetup(),
+    loopController(BODY, {
+      name: `${route.userLimit} requests under the limit`,
+      loops: route.userLimit,
+      child: rateLimitSampler(
+        CHILD,
+        route,
+        `rate limit ${route.title}: each user under the limit (expect ${threads * route.userLimit} samples none refused)`,
+        notRefused(CHILD + '  ')
+      )
+    }),
+    rateLimitSampler(
+      BODY,
+      route,
+      `rate limit ${route.title}: each user over the limit (expect ${threads} samples all refused)`,
+      refused(CHILD)
+    ),
+    `${IND}</hashTree>`
+  )
+}
+
+/**
+ * All users over the route's limit together: more threads than the limit
+ * needs, each a different user sending no more than its own limit, so only
+ * the all-users limit can refuse them.
+ *
+ * Which requests are refused depends on the order they arrive in, so no one
+ * sample can be asserted. The sampler fails a 429 on purpose, with the same
+ * assertions as a request under a limit: its error count is the number
+ * refused (plus any server error), and the label says what it must be.
+ */
+function rateLimitAllUsersStep(route, defaults) {
+  const key = rateLimitKey(route, 'allUsers')
+  const burst = allUsersBurst(route)
+  return lines(
+    threadGroup({
+      name: `Rate limit ${route.title}: all users over the limit`,
+      key,
+      defaults,
+      loops: 1,
+      comment:
+        `${burst.threads} threads, each its own stub user, each send ${burst.requestsPerThread}\n` +
+        `request(s): ${burst.total} in all against a limit of ${route.allUsersLimit} for all users.\n` +
+        `The backend must refuse exactly ${burst.refused} of them with 429 (one copy of\n` +
+        'the backend), and none of the rest. Read the count off the error column.\n' +
+        'Each 503 lowers the expected refused count by one: the backend gives back\n' +
+        'its all-users count.'
+    }),
+    `${IND}<hashTree>`,
+    rateLimitSetup(),
+    loopController(BODY, {
+      name: `${burst.requestsPerThread} request(s) per user`,
+      loops: burst.requestsPerThread,
+      child: rateLimitSampler(
+        CHILD,
+        route,
+        `rate limit ${route.title}: all users (expect ${burst.refused} of ${burst.total} refused)`,
+        notRefused(CHILD + '  ')
+      )
+    }),
+    `${IND}</hashTree>`
+  )
+}
+
+function renderRateLimitBursts(defaults) {
+  const steps = rateLimitPhases().map((phase) => {
+    const route = RATE_LIMITED_ROUTES.find(
+      (r) => phase.key === rateLimitKey(r, 'user') || phase.key === rateLimitKey(r, 'allUsers')
+    )
+    return phase.key.endsWith('_user')
+      ? rateLimitUserStep(route, defaults)
+      : rateLimitAllUsersStep(route, defaults)
+  })
+  return [`${IND}<!-- Rate-limit bursts: ${steps.length} step(s) -->`, ...steps]
+}
+
 // ── Assembly ────────────────────────────────────────────────────────────────
 
 function ladderByKey(key) {
@@ -1173,6 +1433,7 @@ function renderLadders(defaults, mode = PLAN_MODES.legacy) {
   blocks.push(fetchRampGroup(defaults))
   blocks.push(`${IND}<!-- Mixed workload -->`)
   blocks.push(mixedWorkloadGroup(defaults))
+  blocks.push(...renderRateLimitBursts(defaults))
   return blocks.join('\n')
 }
 /**
@@ -1207,6 +1468,10 @@ function renderLaddersSh() {
     `PHASE_GAP_SECONDS_DEFAULT=${DEFAULT_PHASE_GAP_SECONDS}`,
     `SETUP_ALLOWANCE_SECONDS_DEFAULT=${SETUP_ALLOWANCE_SECONDS}`,
     '',
+    '# Stub users a rate-limit profile mints: one for each thread of its widest',
+    '# phase (scripts/rate-limit-users.mjs).',
+    `RATE_LIMIT_USER_COUNT=${rateLimitUserCount()}`,
+    '',
     '# Seconds allowed per fetch of each size. The fetch ramp is loop-count',
     '# driven, so entrypoint.sh re-derives its window from these after staging:',
     '# a size with no prepared project runs no loops, and the window it would',
@@ -1239,6 +1504,9 @@ function renderLaddersSh() {
     // the service while it is being measured, not context for the measurement.
     out.push(`PROFILE_PREAMBLE_${name}=${profile.preamble === false ? 0 : 1}`)
     out.push(`PROFILE_CUTOFF_SECONDS_${name}=${profile.cutoffSeconds ?? 0}`)
+    // 1 when the profile runs the rate-limit bursts, which need a stub user
+    // for each thread rather than the one shared perf user.
+    out.push(`PROFILE_RATE_LIMIT_${name}=${profile.rateLimit ? 1 : 0}`)
     // Rungs the profile lists but the cutoff cannot reach. Emitted so the run
     // can SAY they were not measured; a rung silently absent from the results
     // reads as a rung that refused nothing, which would claim capacity that was
@@ -1278,7 +1546,12 @@ const SECONDS_PER_MINUTE = 60
 /** Every phase key in the plan, ladder steps first, in timeline order. */
 function allPhaseKeys() {
   const keys = LADDERS.flatMap((ladder) => ladderSteps(ladder).map(stepKey))
-  return [...keys, 'fetchRamp', 'mixed']
+  return [
+    ...keys,
+    'fetchRamp',
+    'mixed',
+    ...rateLimitPhases().map((phase) => phase.key)
+  ]
 }
 
 /**
@@ -1471,6 +1744,7 @@ function main() {
 main()
 
 export {
+  RATE_LIMIT_REQUESTS,
   renderLadders,
   renderLaddersSh,
   renderTemplatePlan,

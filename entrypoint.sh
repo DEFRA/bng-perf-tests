@@ -117,6 +117,9 @@ GROWTH_KIB=$(( CREATE_PARCELS_TOTAL * PARCEL_BYTES * AUDIT_COPIES / BYTES_PER_KI
 # Staging is per-size and not all-or-nothing: a size that fails to stage costs
 # its own phase, not the run. Only a total failure — or a failure to build the
 # project pool, which every phase reads its projectId from — gates the task.
+# Set by the caller, or defaulted here? The rate-limit profile stages nothing
+# by default (below), but an explicit value is honoured.
+STAGE_UPLOADS_GIVEN=${STAGE_UPLOADS:+1}
 STAGE_UPLOADS=${STAGE_UPLOADS:-true}
 # The backend hands back only the uploader PATH, so the uploader's own host has
 # to be resolved here. Mirrors the backend's own derivation from ENVIRONMENT.
@@ -361,6 +364,18 @@ profile_value() {
 # quietly change what it measured. Use PERF_PROFILE=standard to get the
 # preamble back.
 eval "PROFILE_PREAMBLE=\${PROFILE_PREAMBLE_${PERF_PROFILE}:-1}"
+# 1 for the rate-limit profile: its bursts need a stub user for each thread
+# (mint_rate_limit_users below), not the one shared perf user.
+eval "PROFILE_RATE_LIMIT=\${PROFILE_RATE_LIMIT_${PERF_PROFILE}:-0}"
+if [ "${PROFILE_RATE_LIMIT}" = "1" ]; then
+  echo "▸ profile '${PERF_PROFILE}': rate-limit bursts — the backend must run with RATE_LIMIT_ENABLED=true, as ONE copy"
+  # The bursts need their own user pool and nothing staging makes, and staging
+  # uploads and scans all four fixtures and builds the project pools. Skip it
+  # unless the caller asked for it.
+  if [ -z "${STAGE_UPLOADS_GIVEN}" ]; then
+    STAGE_UPLOADS=false
+  fi
+fi
 if [ "${PROFILE_PREAMBLE}" = "0" ]; then
   echo "▸ profile '${PERF_PROFILE}': preamble off (no home/list/create/probe groups, no size ramp)"
   HOME_THREADS=0
@@ -774,6 +789,7 @@ if [ "${PERF_DUMP_SCHEDULE}" = "true" ]; then
   echo "TOTAL PROBE ${PROBE_DELAY_SECONDS} ${PROBE_DURATION_SECONDS}"
   echo "TOTAL PREPARED ${PREPARED_SIZES:-none}"
   echo "TOTAL PI ${PI_SIZES:-none}"
+  echo "TOTAL STAGE ${STAGE_UPLOADS}"
   exit 0
 fi
 
@@ -836,6 +852,36 @@ seed_via_api() {
     echo "ERROR: seed-via-api failed against ${api_base_url}" >&2
     return 1
   fi
+  return 0
+}
+
+# Mint a stub user for each thread of the rate-limit bursts, each with one
+# project of its own for the PDF report (scripts/rate-limit-users.mjs). Emits
+# `rateLimitUsersCsv=<path>`, which becomes the -J property the plan reads.
+# $1 = backend base URL. No-op unless the profile runs the bursts.
+mint_rate_limit_users() {
+  api_base_url="$1"
+  if [ "${PROFILE_RATE_LIMIT}" != "1" ]; then
+    return 0
+  fi
+  # xtrace OFF: the script writes tokens to a file, and must not echo them.
+  set +x
+  echo "▸ minting ${RATE_LIMIT_USER_COUNT} rate-limit stub user(s) via ${STUB_BASE_URL}"
+  RATE_LIMIT_OUT=$(API_BASE_URL="${api_base_url}" \
+    RATE_LIMIT_USER_COUNT="${RATE_LIMIT_USER_COUNT}" \
+    RATE_LIMIT_USERS_CSV="${JM_HOME}/stage/rate-limit-users.csv" \
+    STUB_BASE_URL="${STUB_BASE_URL}" \
+    OIDC_REDIRECT_URI="${OIDC_REDIRECT_URI}" \
+    STUB_ISSUER_HOST="${STUB_ISSUER_HOST}" \
+    node "${JM_HOME}/scripts/rate-limit-users.mjs")
+  RATE_LIMIT_STATUS=$?
+  if [ ${RATE_LIMIT_STATUS} -ne 0 ]; then
+    set -x
+    echo "ERROR: minting the rate-limit users failed against ${api_base_url}" >&2
+    return 1
+  fi
+  add_prop rateLimitUsersCsv "$(printf '%s' "${RATE_LIMIT_OUT}" | sed -n 's/^rateLimitUsersCsv=//p')"
+  set -x
   return 0
 }
 
@@ -946,8 +992,16 @@ disable_unstaged_phases() {
   if [ "${STAGE_UPLOADS}" != "true" ]; then
     echo "▸ STAGE_UPLOADS is not true — skipping every upload, edit and fetch phase" >&2
     for phase_key in ${ALL_PHASE_KEYS}; do
-      eval "PHASE_USERS_${phase_key}=0"
+      case "${phase_key}" in
+        # The rate-limit bursts read their own user pool, not staging; that
+        # pool is checked below.
+        rateLimit_*) ;;
+        *) eval "PHASE_USERS_${phase_key}=0" ;;
+      esac
     done
+    if ! staged_prop rateLimitUsersCsv; then
+      disable_phases_matching "rateLimit_"
+    fi
     for upload_label in ${LADDER_SIZES}; do
       eval "FETCH_LOOPS_${upload_label}=0"
     done
@@ -1003,6 +1057,12 @@ disable_unstaged_phases() {
   if ! staged_prop contentionProjectId; then
     echo "▸ no contention project — skipping the edit-contention ladder" >&2
     disable_phases_matching "editContention_"
+  fi
+
+  # The rate-limit bursts need only their user pool: the validate bursts send
+  # no staged upload (gen-scenario.mjs RATE_LIMIT_REQUESTS).
+  if ! staged_prop rateLimitUsersCsv; then
+    disable_phases_matching "rateLimit_"
   fi
 
   # The mixed workload reads the prepared pool and revalidates the normal
@@ -1129,9 +1189,18 @@ add_prop mixEditPercent "${MIX_EDIT_PERCENT}"
 add_prop mixValidatePercent "${MIX_VALIDATE_PERCENT}"
 add_prop mixThinkMs "${MIX_THINK_MS}"
 
+# The rate-limit bursts' targets. Unset, the plan's own defaults win: a fake
+# uploadId for the validate bursts, /os-tiles/capabilities for the tile bursts.
+add_prop rateLimitValidateUploadId "${RATE_LIMIT_VALIDATE_UPLOAD_ID}"
+add_prop rateLimitTilePath "${RATE_LIMIT_TILE_PATH}"
+
 set -x
 if ! stage_uploads "${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${BACKEND_PORT}"; then
   echo "ERROR: upload staging failed — cannot run ${SCENARIO}" >&2
+  exit 1
+fi
+if ! mint_rate_limit_users "${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${BACKEND_PORT}"; then
+  echo "ERROR: no rate-limit users — cannot run ${SCENARIO}" >&2
   exit 1
 fi
 set +x

@@ -410,7 +410,209 @@ export const PROFILES = {
     mixedSeconds: 0,
     targetScale: 1,
     sizeRampLoops: { normal: 0, medium: 0, large: 0, xlarge: 0 }
+  },
+  ratelimit: {
+    /**
+     * The backend's rate limits (BMD-1203), and nothing else: a burst at each
+     * limited route, from stub users minted one for each thread, so the limit
+     * for each user applies as it does to real users. See RATE_LIMITED_ROUTES.
+     *
+     * Run it with RATE_LIMIT_ENABLED=true on the backend, and the two profiles
+     * above with RATE_LIMIT_ENABLED=false: their ladders send more than the
+     * limits from one stub user on purpose. The setting is the backend's, in
+     * cdp-app-config, so the backend is deployed again before each profile.
+     *
+     * Written `ratelimit`, not `rate-limit`: the name becomes part of shell
+     * variable names in ladders.sh, and a hyphen cannot be.
+     */
+    description:
+      'RATE LIMITS — a burst at each rate-limited backend route, one stub user per thread, with RATE_LIMIT_ENABLED=true on the backend',
+    // The bursts are a fixed, short list; there is no ladder to trim.
+    budgetMinutes: null,
+    preamble: false,
+    ladders: {
+      journey: {},
+      revalidate: {},
+      pi: {},
+      edit: {},
+      editContention: [],
+      saturate: {}
+    },
+    rateLimit: true,
+    fetchRamp: false,
+    mixedSeconds: 0,
+    targetScale: 1,
+    sizeRampLoops: { normal: 0, medium: 0, large: 0, xlarge: 0 }
   }
+}
+
+/**
+ * The backend's rate-limited routes and their default limits, per minute: one
+ * for each user and one for all users together (bng-metric-backend,
+ * src/config.js `rateLimit`). These must match the backend. When a limit
+ * changes there (open point 2 of BMD-1203), change it here and run
+ * `npm run gen-scenario`.
+ *
+ * `secondsPerRequest` is an ALLOWANCE for one request, as the bursts send it.
+ * It does not size a window — every burst gets the whole rate-limit window —
+ * but a test holds each burst to three quarters of that window, because a
+ * burst that ran past it would see its count reset and pass a request that
+ * should have been refused.
+ *
+ * The validate bursts are cheap on purpose: their uploadId is not one (see
+ * gen-scenario.mjs RATE_LIMIT_REQUESTS). The backend checks the limits before
+ * it validates the request, so each one counts, and the route answers 400 in
+ * milliseconds. A real validation takes seconds, and 41 of them in sequence
+ * could not fit in a minute; validation cost is what `standard` measures.
+ */
+export const RATE_LIMITED_ROUTES = [
+  {
+    key: 'uploadInitiate',
+    title: 'upload start',
+    userLimit: 10,
+    allUsersLimit: 60,
+    secondsPerRequest: 1
+  },
+  {
+    key: 'baselineValidate',
+    title: 'baseline validation',
+    userLimit: 40,
+    allUsersLimit: 120,
+    secondsPerRequest: 0.2
+  },
+  {
+    key: 'piValidate',
+    title: 'post-intervention validation',
+    userLimit: 40,
+    allUsersLimit: 120,
+    secondsPerRequest: 0.2
+  },
+  {
+    key: 'report',
+    title: 'PDF report',
+    userLimit: 5,
+    allUsersLimit: 20,
+    // The tightest burst: 6 reports in sequence must take under 45 s, so each
+    // must take under 7.5 s. Slower than that, the 6th can pass when it
+    // should be refused; the README says how to read that.
+    secondsPerRequest: 7
+  },
+  {
+    key: 'osTiles',
+    title: 'OS map tiles',
+    userLimit: 600,
+    allUsersLimit: 3000,
+    secondsPerRequest: 0.05
+  }
+]
+
+/** The length of every backend rate-limit window, in seconds. */
+export const RATE_LIMIT_WINDOW_SECONDS = 60
+
+/**
+ * Threads in each phase that goes over the limit for each user. Two, so the
+ * run also shows that one user's refusal is that user's alone.
+ */
+export const RATE_LIMIT_USER_PHASE_THREADS = 2
+
+/**
+ * About how many threads share the all-users limit. Each sends no more than
+ * its own limit, so only the all-users limit can refuse it.
+ */
+export const RATE_LIMIT_ALL_USERS_THREADS = 8
+
+/**
+ * Concurrent requests slow each other down, so an all-users burst is allowed
+ * this many times its allowance for each request.
+ */
+export const RATE_LIMIT_CONTENTION_FACTOR = 2
+
+/**
+ * The share of the rate-limit window a burst may be expected to take: three
+ * quarters, so a burst that runs a quarter slower than its allowance still
+ * sends its last request inside the window its first one opened.
+ */
+export const RATE_LIMIT_BURST_MARGIN = 0.75
+
+/** The longest a burst may be expected to take, in seconds (45). */
+export const RATE_LIMIT_BURST_BUDGET_SECONDS =
+  RATE_LIMIT_WINDOW_SECONDS * RATE_LIMIT_BURST_MARGIN
+
+/**
+ * Seconds a burst is expected to take: the requests one thread sends, in
+ * sequence, at their allowance. A test holds it to
+ * RATE_LIMIT_BURST_BUDGET_SECONDS.
+ */
+export function rateLimitBurstSeconds(route, kind) {
+  if (kind === 'user') {
+    return (route.userLimit + 1) * route.secondsPerRequest
+  }
+  return (
+    allUsersBurst(route).requestsPerThread *
+    route.secondsPerRequest *
+    RATE_LIMIT_CONTENTION_FACTOR
+  )
+}
+
+/**
+ * How the all-users phase of a route is shaped: threads, the requests each
+ * sends, and how many of all of them the backend must refuse (on one copy of
+ * the backend; each copy counts on its own).
+ */
+export function allUsersBurst(route) {
+  const requestsPerThread = Math.min(
+    route.userLimit,
+    Math.ceil(route.allUsersLimit / RATE_LIMIT_ALL_USERS_THREADS)
+  )
+  const threads = Math.floor(route.allUsersLimit / requestsPerThread) + 1
+  const total = threads * requestsPerThread
+  return {
+    threads,
+    requestsPerThread,
+    total,
+    refused: total - route.allUsersLimit
+  }
+}
+
+/** The key of a rate-limit phase: `rateLimit_<route>_<user | allUsers>`. */
+export function rateLimitKey(route, kind) {
+  return `rateLimit_${route.key}_${kind}`
+}
+
+/**
+ * The rate-limit phases, in timeline order: every route's phase for each user,
+ * then every route's phase for all users.
+ *
+ * A window starts at a route's first request and does not slide, so the count
+ * a route's user phase left must have expired before its all-users phase
+ * starts. The backend counts each route on its own, and the other routes'
+ * phases (each a whole window) come between the two, so no extra gap is needed.
+ */
+export function rateLimitPhases() {
+  // Every burst gets the whole rate-limit window as its JMeter window. A
+  // thread stops after its fixed requests, so the window is only a guard, and
+  // a burst that needs longer than the limit's window measures nothing.
+  const userPhases = RATE_LIMITED_ROUTES.map((route) => ({
+    key: rateLimitKey(route, 'user'),
+    users: RATE_LIMIT_USER_PHASE_THREADS,
+    window: RATE_LIMIT_WINDOW_SECONDS,
+    gap: PHASE_GAP_BOUNDS.maxSeconds
+  }))
+  const allUsersPhases = RATE_LIMITED_ROUTES.map((route) => ({
+    key: rateLimitKey(route, 'allUsers'),
+    users: allUsersBurst(route).threads,
+    window: RATE_LIMIT_WINDOW_SECONDS,
+    gap: PHASE_GAP_BOUNDS.maxSeconds
+  }))
+  return [...userPhases, ...allUsersPhases]
+}
+
+/**
+ * Stub users the rate-limit profile mints, one for each thread of its widest
+ * phase, so no two threads of a phase are the same user.
+ */
+export function rateLimitUserCount() {
+  return Math.max(...rateLimitPhases().map((phase) => phase.users))
 }
 
 /**
@@ -718,6 +920,9 @@ export function profilePhases(profileName) {
       window: profile.mixedSeconds,
       gap: DEFAULT_PHASE_GAP_SECONDS
     })
+  }
+  if (profile.rateLimit) {
+    phases.push(...rateLimitPhases())
   }
   return phases
 }
