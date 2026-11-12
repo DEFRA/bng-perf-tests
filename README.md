@@ -1339,10 +1339,11 @@ For each route, two phases:
   label says how many must be refused (`expect N of M refused`), and its error column
   is that count.
 
-All the "each user" phases run first. The "all users" phases start a whole window
-(60 s) plus slack later, because a window starts at a route's first request and does
-not slide: an earlier count must have expired. Setting `PHASE_GAP_SECONDS` replaces
-that gap and can break this.
+All the "each user" phases run first. A window starts at a route's first request and
+does not slide, so a route's "all users" phase must start after the count of its "each
+user" phase has expired. The backend counts each route on its own, and the phases of
+the other routes (each a whole window, 60 s) come between the two, so this holds for
+any `PHASE_GAP_SECONDS`.
 
 Under a limit, a 503 (the validator is busy) and a route's own 4xx do not fail a
 sample; a 429 or another 5xx does.

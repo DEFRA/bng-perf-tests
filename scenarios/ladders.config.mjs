@@ -521,8 +521,6 @@ export const RATE_LIMIT_USER_PHASE_THREADS = 2
  */
 export const RATE_LIMIT_ALL_USERS_THREADS = 8
 
-const RATE_LIMIT_SLACK_SECONDS = 5
-
 /**
  * Concurrent requests slow each other down, so an all-users burst is allowed
  * this many times its allowance for each request.
@@ -585,10 +583,10 @@ export function rateLimitKey(route, kind) {
  * The rate-limit phases, in timeline order: every route's phase for each user,
  * then every route's phase for all users.
  *
- * The all-users phases come after a gap of a whole window plus slack. A
- * window starts at a route's first request and does not slide, so the count
- * the user phases left must have expired before the all-users count starts,
- * or that phase would be refused early.
+ * A window starts at a route's first request and does not slide, so the count
+ * a route's user phase left must have expired before its all-users phase
+ * starts. The backend counts each route on its own, and the other routes'
+ * phases (each a whole window) come between the two, so no extra gap is needed.
  */
 export function rateLimitPhases() {
   // Every burst gets the whole rate-limit window as its JMeter window. A
@@ -600,7 +598,6 @@ export function rateLimitPhases() {
     window: RATE_LIMIT_WINDOW_SECONDS,
     gap: PHASE_GAP_BOUNDS.maxSeconds
   }))
-  userPhases.at(-1).gap = RATE_LIMIT_WINDOW_SECONDS + RATE_LIMIT_SLACK_SECONDS
   const allUsersPhases = RATE_LIMITED_ROUTES.map((route) => ({
     key: rateLimitKey(route, 'allUsers'),
     users: allUsersBurst(route).threads,

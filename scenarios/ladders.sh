@@ -256,13 +256,13 @@ PROFILE_SIZE_LOOPS_short_large=0
 PROFILE_SIZE_LOOPS_short_xlarge=0
 
 # ── ratelimit — RATE LIMITS — a burst at each rate-limited backend route, one stub user per thread, with RATE_LIMIT_ENABLED=true on the backend
-#    10 phase(s); plan 715s, no budget
+#    10 phase(s); plan 655s, no budget
 PROFILE_BUDGET_SECONDS_ratelimit=0
 PROFILE_PREAMBLE_ratelimit=0
 PROFILE_CUTOFF_SECONDS_ratelimit=0
 PROFILE_RATE_LIMIT_ratelimit=1
 PROFILE_SKIPPED_ratelimit=""
-PROFILE_PLAN_SECONDS_ratelimit=715
+PROFILE_PLAN_SECONDS_ratelimit=655
 PROFILE_PHASES_ratelimit="rateLimit_uploadInitiate_user rateLimit_baselineValidate_user rateLimit_piValidate_user rateLimit_report_user rateLimit_osTiles_user rateLimit_uploadInitiate_allUsers rateLimit_baselineValidate_allUsers rateLimit_piValidate_allUsers rateLimit_report_allUsers rateLimit_osTiles_allUsers"
 PROFILE_WINDOW_ratelimit_rateLimit_uploadInitiate_user=60
 PROFILE_GAP_ratelimit_rateLimit_uploadInitiate_user=5
@@ -277,7 +277,7 @@ PROFILE_WINDOW_ratelimit_rateLimit_report_user=60
 PROFILE_GAP_ratelimit_rateLimit_report_user=5
 PROFILE_USERS_ratelimit_rateLimit_report_user=2
 PROFILE_WINDOW_ratelimit_rateLimit_osTiles_user=60
-PROFILE_GAP_ratelimit_rateLimit_osTiles_user=65
+PROFILE_GAP_ratelimit_rateLimit_osTiles_user=5
 PROFILE_USERS_ratelimit_rateLimit_osTiles_user=2
 PROFILE_WINDOW_ratelimit_rateLimit_uploadInitiate_allUsers=60
 PROFILE_GAP_ratelimit_rateLimit_uploadInitiate_allUsers=5
