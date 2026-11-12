@@ -71,7 +71,14 @@ generator derive an identical schedule for the profile.
 
 ### The profile — how long a run takes
 
-There is exactly **one profile**: `standard`. There used to be five (`quick` /
+The capacity profile is `standard` (below); `short` finds the saturation point and
+`ratelimit` checks the backend's rate limits — see
+[the rate-limit profile](#checking-the-rate-limits--the-ratelimit-profile). Both
+capacity profiles, `standard` and `short`, need the backend deployed with
+**`RATE_LIMIT_ENABLED=false`**: their ladders send more than the limits from one stub
+user. `ratelimit` needs it **`true`**.
+
+There is exactly **one capacity profile**: `standard`. There used to be five (`quick` /
 `standard` / `deep` / `full` / `soak`); keeping five step lists meaningful cost more
 than the flexibility bought, so the suite now runs one well-chosen set — the old
 `deep`. The plan contains **53 ladder steps** and `standard` runs 40 of them: the
@@ -824,7 +831,7 @@ run is meaningless.
 
 | Env var                          | Default                                        | Purpose                                                        |
 | -------------------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
-| `PROFILE`                        | unset → `standard`                             | **The CDP portal's Profile field.** Names a profile (`standard` \| `short`). This is the variable a CDP task carries; every run states what it resolved. |
+| `PROFILE`                        | unset → `standard`                             | **The CDP portal's Profile field.** Names a profile (`standard` \| `short` \| `ratelimit`). This is the variable a CDP task carries; every run states what it resolved. |
 | `TEST_SCENARIO`                  | `bng-perf`                                     | Names a **plan** (`scenarios/<name>.jmx`), and — second, for local runs — a profile. Owned by the base image, never set by the portal. |
 | `UPLOAD_TEMPLATE`                | `legacy`                                       | `legacy` or `service` — which upload template the run uploads, and so which plan it runs. Must match the target's `SERVICE_TEMPLATE_ENABLED`; see [the BNG Service template](#the-bng-service-template--upload_templateservice). |
 | `UPLOAD_SIZES`                   | `normal:80,medium:800,large:5000,xlarge:12000` | How big each step is. `label:parcels` pairs — the **labels are fixed**, see below. |
@@ -1275,6 +1282,81 @@ Two escape hatches, in the order to try them:
 
 The password is never taken on the command line by default: it comes from
 `--password`, `BNG_PASSWORD`, `DEFRA_ID_PASSWORD`, or a masked prompt.
+
+## Checking the rate limits — the `ratelimit` profile
+
+The backend rate-limits the routes that cost the most to serve (BMD-1203): each has a
+limit for each user (the token's `sub`) and one for all users together, per minute.
+A refused request gets **429** with a `Retry-After` header. The limits, as
+`scenarios/ladders.config.mjs` (`RATE_LIMITED_ROUTES`) holds them, must match the
+backend's defaults:
+
+| Route                                        | Each user | All users |
+| -------------------------------------------- | --------: | --------: |
+| `POST /upload/initiate`                      |        10 |        60 |
+| `POST /baseline/validate/{uploadId}`         |        40 |       120 |
+| `POST /post-intervention/validate/{uploadId}`|        40 |       120 |
+| `GET /projects/{projectId}/report.pdf`       |         5 |        20 |
+| `GET /os-tiles/*` (each route)               |       600 |      3000 |
+
+The values are estimates; this profile is what confirms or changes them. When the
+backend's change, change `RATE_LIMITED_ROUTES` and run `npm run gen-scenario`.
+
+```sh
+PROFILE=ratelimit ./entrypoint.sh
+```
+
+### The backend setting for each profile
+
+`RATE_LIMIT_ENABLED` is a **backend** setting, in cdp-app-config for the perf-test
+environment. This suite cannot change it, so **deploy the backend again before each
+profile**:
+
+| Profile               | Backend `RATE_LIMIT_ENABLED` | Why |
+| --------------------- | ---------------------------- | --- |
+| `ratelimit`           | `true`                       | It tests the limits. |
+| `standard`, `short`   | `false`                      | Their ladders send more than the limits from one stub user on purpose. |
+
+Run `ratelimit` against **one copy** of the backend. The counts are in memory, so each
+copy counts on its own, and with more copies a refusal comes only at the limit times
+the number of copies.
+
+### What it runs
+
+Every thread is **its own stub user**. Before JMeter starts,
+`scripts/rate-limit-users.mjs` mints one user for each thread of the widest phase
+(`RATE_LIMIT_USER_COUNT` in `scenarios/ladders.sh`), gives each one small project with
+a baseline (for the PDF report), and writes `stage/rate-limit-users.csv`. The plan
+reads a row for each thread.
+
+For each route, two phases:
+
+- **each user over the limit** — 2 threads each send the limit for each user, which
+  must not be refused, then 1 more, which must be **429 with `Retry-After`**. The
+  samplers use `assume_success`, so their error column counts exactly the requests a
+  limit got wrong.
+- **all users over the limit** — more threads than the limit needs, each sending no
+  more than its own limit, so only the all-users limit can refuse them. The sampler
+  label says how many must be refused (`expect N of M refused`), and its error column
+  is that count.
+
+All the "each user" phases run first. The "all users" phases start a whole window
+(60 s) plus slack later, because a window starts at a route's first request and does
+not slide: an earlier count must have expired. Setting `PHASE_GAP_SECONDS` replaces
+that gap and can break this.
+
+Under a limit, a 503 (the validator is busy) and a route's own 4xx do not fail a
+sample; a 429 or another 5xx does. The validate bursts use the staged `normal`
+uploads, with no project. The tile bursts use `/os-tiles/capabilities` (set
+`-JrateLimitTilePath=/os-tiles/{z}/{col}/{row}.png` for a tile); the routes exist only
+where the backend has an OS key, so elsewhere they answer 404.
+
+**What can go wrong.** A user's burst is sent in sequence, so its last request must
+arrive inside the window its first one opened. If 41 validations take over a minute,
+the 41st is not refused and that sample fails: read the latency, not just the error.
+The plugin also counts refused requests, and counts a user's requests toward the
+all-users limit even when that user is over their own, so one user who keeps sending
+uses up the all-users limit for everybody until the window ends.
 
 ## Finding the saturation point — the `short` profile
 

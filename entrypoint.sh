@@ -361,6 +361,12 @@ profile_value() {
 # quietly change what it measured. Use PERF_PROFILE=standard to get the
 # preamble back.
 eval "PROFILE_PREAMBLE=\${PROFILE_PREAMBLE_${PERF_PROFILE}:-1}"
+# 1 for the rate-limit profile: its bursts need a stub user for each thread
+# (mint_rate_limit_users below), not the one shared perf user.
+eval "PROFILE_RATE_LIMIT=\${PROFILE_RATE_LIMIT_${PERF_PROFILE}:-0}"
+if [ "${PROFILE_RATE_LIMIT}" = "1" ]; then
+  echo "▸ profile '${PERF_PROFILE}': rate-limit bursts — the backend must run with RATE_LIMIT_ENABLED=true, as ONE copy"
+fi
 if [ "${PROFILE_PREAMBLE}" = "0" ]; then
   echo "▸ profile '${PERF_PROFILE}': preamble off (no home/list/create/probe groups, no size ramp)"
   HOME_THREADS=0
@@ -839,6 +845,36 @@ seed_via_api() {
   return 0
 }
 
+# Mint a stub user for each thread of the rate-limit bursts, each with one
+# project of its own for the PDF report (scripts/rate-limit-users.mjs). Emits
+# `rateLimitUsersCsv=<path>`, which becomes the -J property the plan reads.
+# $1 = backend base URL. No-op unless the profile runs the bursts.
+mint_rate_limit_users() {
+  api_base_url="$1"
+  if [ "${PROFILE_RATE_LIMIT}" != "1" ]; then
+    return 0
+  fi
+  # xtrace OFF: the script writes tokens to a file, and must not echo them.
+  set +x
+  echo "▸ minting ${RATE_LIMIT_USER_COUNT} rate-limit stub user(s) via ${STUB_BASE_URL}"
+  RATE_LIMIT_OUT=$(API_BASE_URL="${api_base_url}" \
+    RATE_LIMIT_USER_COUNT="${RATE_LIMIT_USER_COUNT}" \
+    RATE_LIMIT_USERS_CSV="${JM_HOME}/stage/rate-limit-users.csv" \
+    STUB_BASE_URL="${STUB_BASE_URL}" \
+    OIDC_REDIRECT_URI="${OIDC_REDIRECT_URI}" \
+    STUB_ISSUER_HOST="${STUB_ISSUER_HOST}" \
+    node "${JM_HOME}/scripts/rate-limit-users.mjs")
+  RATE_LIMIT_STATUS=$?
+  if [ ${RATE_LIMIT_STATUS} -ne 0 ]; then
+    set -x
+    echo "ERROR: minting the rate-limit users failed against ${api_base_url}" >&2
+    return 1
+  fi
+  add_prop rateLimitUsersCsv "$(printf '%s' "${RATE_LIMIT_OUT}" | sed -n 's/^rateLimitUsersCsv=//p')"
+  set -x
+  return 0
+}
+
 # Stage real uploads for the plan's upload phases: generate GeoPackages at each size,
 # push them through the CDP Uploader, wait for the scan, and create a pool of
 # projects to spread concurrent writes across. Emits `key=value` lines which
@@ -1005,6 +1041,20 @@ disable_unstaged_phases() {
     disable_phases_matching "editContention_"
   fi
 
+  # The rate-limit bursts need their user pool, and the validate bursts the
+  # normal uploads staging made.
+  if ! staged_prop rateLimitUsersCsv; then
+    disable_phases_matching "rateLimit_"
+  fi
+  if ! staged_upload normal; then
+    echo "▸ no staged normal upload — skipping the baseline validation rate-limit bursts" >&2
+    disable_phases_matching "rateLimit_baselineValidate_"
+  fi
+  if ! staged_prop piUploadId_normal; then
+    echo "▸ no staged normal post-intervention upload — skipping its rate-limit bursts" >&2
+    disable_phases_matching "rateLimit_piValidate_"
+  fi
+
   # The mixed workload reads the prepared pool and revalidates the normal
   # upload, so it needs both. It is the one group that would otherwise fail
   # halfway through its weights rather than not run at all.
@@ -1132,6 +1182,10 @@ add_prop mixThinkMs "${MIX_THINK_MS}"
 set -x
 if ! stage_uploads "${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${BACKEND_PORT}"; then
   echo "ERROR: upload staging failed — cannot run ${SCENARIO}" >&2
+  exit 1
+fi
+if ! mint_rate_limit_users "${SERVICE_URL_SCHEME}://${BACKEND_DOMAIN}:${BACKEND_PORT}"; then
+  echo "ERROR: no rate-limit users — cannot run ${SCENARIO}" >&2
   exit 1
 fi
 set +x

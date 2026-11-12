@@ -19,15 +19,21 @@ import { test, describe } from 'node:test'
 import {
   LADDERS,
   PROFILES,
+  RATE_LIMITED_ROUTES,
+  RATE_LIMIT_WINDOW_SECONDS,
   SETUP_ALLOWANCE_SECONDS,
   SIZE_LABELS,
   WINDOW_BOUNDS,
+  allUsersBurst,
   budgetCheck,
   generatedBlockStartSeconds,
   ladderSteps,
   phasesBeyondCutoff,
   phasesWithinCutoff,
   profilePhases,
+  rateLimitKey,
+  rateLimitPhases,
+  rateLimitUserCount,
   runSeconds,
   stepAllowanceSeconds,
   scheduleFrom,
@@ -107,9 +113,10 @@ describe('window derivation', () => {
 
 describe('profiles', () => {
   test('every profile only names steps the plan has a thread group for', () => {
-    const known = new Set(
-      LADDERS.flatMap((ladder) => ladderSteps(ladder).map(stepKey))
-    )
+    const known = new Set([
+      ...LADDERS.flatMap((ladder) => ladderSteps(ladder).map(stepKey)),
+      ...rateLimitPhases().map((phase) => phase.key)
+    ])
     for (const name of Object.keys(PROFILES)) {
       for (const phase of profilePhases(name)) {
         if (phase.key === 'fetchRamp' || phase.key === 'mixed') {
@@ -147,8 +154,91 @@ describe('profiles', () => {
     // a cutoff instead of a budget. None of that could live as a knob on
     // `standard` without making `standard` mean two things.
     //
-    // A THIRD entry should be a conscious decision, not an accident.
-    assert.deepEqual(Object.keys(PROFILES), ['standard', 'short'])
+    // `ratelimit` (BMD-1203) is the third, and a conscious one: it asks
+    // neither question. It checks that the backend's rate limits refuse what
+    // they must and nothing else, with a stub user for each thread, and it
+    // needs the backend deployed with RATE_LIMIT_ENABLED=true where the other
+    // two need it false.
+    //
+    // A FOURTH entry should be a conscious decision, not an accident.
+    assert.deepEqual(Object.keys(PROFILES), ['standard', 'short', 'ratelimit'])
+  })
+})
+
+describe('the rate-limit profile', () => {
+  const backendDefaults = {
+    uploadInitiate: [10, 60],
+    baselineValidate: [40, 120],
+    piValidate: [40, 120],
+    report: [5, 20],
+    osTiles: [600, 3000]
+  }
+
+  test("uses the backend's default limits", () => {
+    assert.deepEqual(
+      Object.fromEntries(
+        RATE_LIMITED_ROUTES.map((r) => [r.key, [r.userLimit, r.allUsersLimit]])
+      ),
+      backendDefaults
+    )
+  })
+
+  test('runs only the rate-limit bursts, and the other profiles never do', () => {
+    const keys = profilePhases('ratelimit').map((phase) => phase.key)
+    assert.deepEqual(keys, rateLimitPhases().map((phase) => phase.key))
+    for (const name of ['standard', 'short']) {
+      assert.ok(
+        profilePhases(name).every((phase) => !phase.key.startsWith('rateLimit_')),
+        `${name} schedules a rate-limit burst`
+      )
+    }
+  })
+
+  test('bursts each limited route once over each limit', () => {
+    const keys = rateLimitPhases().map((phase) => phase.key)
+    for (const route of RATE_LIMITED_ROUTES) {
+      assert.ok(keys.includes(rateLimitKey(route, 'user')))
+      assert.ok(keys.includes(rateLimitKey(route, 'allUsers')))
+    }
+  })
+
+  test('an all-users burst passes the all-users limit with no user over its own', () => {
+    for (const route of RATE_LIMITED_ROUTES) {
+      const burst = allUsersBurst(route)
+      assert.ok(burst.requestsPerThread <= route.userLimit, route.key)
+      assert.ok(burst.total > route.allUsersLimit, route.key)
+      assert.equal(burst.refused, burst.total - route.allUsersLimit)
+    }
+  })
+
+  test('the user bursts leave the all-users count of each route under its limit', () => {
+    const userPhases = rateLimitPhases().filter((p) => p.key.endsWith('_user'))
+    for (const route of RATE_LIMITED_ROUTES) {
+      const phase = userPhases.find((p) => p.key === rateLimitKey(route, 'user'))
+      assert.ok(
+        phase.users * (route.userLimit + 1) < route.allUsersLimit,
+        `${route.key}: the user burst alone would reach the all-users limit`
+      )
+    }
+  })
+
+  test('the all-users bursts start after the user bursts\' windows have expired', () => {
+    const scheduled = scheduleFrom(rateLimitPhases(), 0)
+    for (const route of RATE_LIMITED_ROUTES) {
+      const user = scheduled.find((p) => p.key === rateLimitKey(route, 'user'))
+      const all = scheduled.find((p) => p.key === rateLimitKey(route, 'allUsers'))
+      assert.ok(
+        all.delay - user.delay > RATE_LIMIT_WINDOW_SECONDS,
+        `${route.key}: the all-users burst starts inside the user burst's window`
+      )
+    }
+  })
+
+  test('mints a different user for every thread of its widest phase', () => {
+    assert.equal(
+      rateLimitUserCount(),
+      Math.max(...rateLimitPhases().map((phase) => phase.users))
+    )
   })
 })
 
@@ -560,7 +650,8 @@ describe('the committed plan', () => {
     const known = new Set([
       ...LADDERS.flatMap((ladder) => ladderSteps(ladder).map(stepKey)),
       'fetchRamp',
-      'mixed'
+      'mixed',
+      ...rateLimitPhases().map((phase) => phase.key)
     ])
     const referenced = [...generated.matchAll(/__P\(users_(\w+),/g)].map((m) => m[1])
     assert.ok(referenced.length > 0, 'expected generated thread groups')
