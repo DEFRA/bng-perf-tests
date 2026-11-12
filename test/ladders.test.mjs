@@ -20,6 +20,7 @@ import {
   LADDERS,
   PROFILES,
   RATE_LIMITED_ROUTES,
+  RATE_LIMIT_BURST_BUDGET_SECONDS,
   RATE_LIMIT_WINDOW_SECONDS,
   SETUP_ALLOWANCE_SECONDS,
   SIZE_LABELS,
@@ -235,15 +236,16 @@ describe('the rate-limit profile', () => {
     }
   })
 
-  test('every burst finishes well inside the rate-limit window', () => {
+  test('every burst fits in three quarters of the rate-limit window', () => {
     // A burst that ran past the window would see its count reset, and pass a
-    // request that should have been refused. Half the window leaves room for a
-    // slow day.
+    // request that should have been refused. The last quarter leaves room for
+    // a burst that runs slower than its allowance.
+    assert.equal(RATE_LIMIT_BURST_BUDGET_SECONDS, RATE_LIMIT_WINDOW_SECONDS * 0.75)
     for (const route of RATE_LIMITED_ROUTES) {
       for (const kind of ['user', 'allUsers']) {
         assert.ok(
-          rateLimitBurstSeconds(route, kind) < RATE_LIMIT_WINDOW_SECONDS,
-          `${route.key} ${kind}: the burst does not fit in the window`
+          rateLimitBurstSeconds(route, kind) <= RATE_LIMIT_BURST_BUDGET_SECONDS,
+          `${route.key} ${kind}: the burst takes ${rateLimitBurstSeconds(route, kind)} s, over ${RATE_LIMIT_BURST_BUDGET_SECONDS} s`
         )
       }
     }

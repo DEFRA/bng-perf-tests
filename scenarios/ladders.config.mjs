@@ -455,7 +455,7 @@ export const PROFILES = {
  *
  * `secondsPerRequest` is an ALLOWANCE for one request, as the bursts send it.
  * It does not size a window — every burst gets the whole rate-limit window —
- * but a test holds each burst to finishing well inside that window, because a
+ * but a test holds each burst to three quarters of that window, because a
  * burst that ran past it would see its count reset and pass a request that
  * should have been refused.
  *
@@ -492,7 +492,10 @@ export const RATE_LIMITED_ROUTES = [
     title: 'PDF report',
     userLimit: 5,
     allUsersLimit: 20,
-    secondsPerRequest: 8
+    // The tightest burst: 6 reports in sequence must take under 45 s, so each
+    // must take under 7.5 s. Slower than that, the 6th can pass when it
+    // should be refused; the README says how to read that.
+    secondsPerRequest: 7
   },
   {
     key: 'osTiles',
@@ -527,9 +530,20 @@ const RATE_LIMIT_SLACK_SECONDS = 5
 export const RATE_LIMIT_CONTENTION_FACTOR = 2
 
 /**
+ * The share of the rate-limit window a burst may be expected to take: three
+ * quarters, so a burst that runs a quarter slower than its allowance still
+ * sends its last request inside the window its first one opened.
+ */
+export const RATE_LIMIT_BURST_MARGIN = 0.75
+
+/** The longest a burst may be expected to take, in seconds (45). */
+export const RATE_LIMIT_BURST_BUDGET_SECONDS =
+  RATE_LIMIT_WINDOW_SECONDS * RATE_LIMIT_BURST_MARGIN
+
+/**
  * Seconds a burst is expected to take: the requests one thread sends, in
- * sequence, at their allowance. It must stay well inside the rate-limit
- * window (a test holds it to that).
+ * sequence, at their allowance. A test holds it to
+ * RATE_LIMIT_BURST_BUDGET_SECONDS.
  */
 export function rateLimitBurstSeconds(route, kind) {
   if (kind === 'user') {

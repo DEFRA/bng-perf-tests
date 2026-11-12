@@ -71,14 +71,13 @@ generator derive an identical schedule for the profile.
 
 ### The profile — how long a run takes
 
-The capacity profile is `standard` (below); `short` finds the saturation point and
-`ratelimit` checks the backend's rate limits — see
-[the rate-limit profile](#checking-the-rate-limits--the-ratelimit-profile). Both
-capacity profiles, `standard` and `short`, need the backend deployed with
-**`RATE_LIMIT_ENABLED=false`**: their ladders send more than the limits from one stub
-user. `ratelimit` needs it **`true`**.
+There are two **capacity profiles**: `standard` (below) measures how the service
+performs under load, and `short` finds the saturation point. A third profile, `ratelimit`, checks the backend's rate
+limits — see [the rate-limit profile](#checking-the-rate-limits--the-ratelimit-profile).
+Both capacity profiles need the backend deployed with **`RATE_LIMIT_ENABLED=false`**: their
+ladders send more than the limits from one stub user. `ratelimit` needs it **`true`**.
 
-There is exactly **one capacity profile**: `standard`. There used to be five (`quick` /
+`standard` is the only capacity profile that runs the full ladders. There used to be five (`quick` /
 `standard` / `deep` / `full` / `soak`); keeping five step lists meaningful cost more
 than the flexibility bought, so the suite now runs one well-chosen set — the old
 `deep`. The plan contains **53 ladder steps** and `standard` runs 40 of them: the
@@ -1315,7 +1314,7 @@ profile**:
 | Profile               | Backend `RATE_LIMIT_ENABLED` | Why |
 | --------------------- | ---------------------------- | --- |
 | `ratelimit`           | `true`                       | It tests the limits. |
-| `standard`, `short`   | `false`                      | Their ladders send more than the limits from one stub user on purpose. |
+| `standard`, `short` (the capacity profiles) | `false` | Their ladders send more than the limits from one stub user on purpose. |
 
 Run `ratelimit` against **one copy** of the backend. The counts are in memory, so each
 copy counts on its own, and with more copies a refusal comes only at the limit times
@@ -1361,11 +1360,13 @@ sample; a 429 or another 5xx does.
 
 **What can go wrong.** A user's burst is sent in sequence, so its last request must
 arrive inside the window its first one opened. Every burst gets the whole one-minute
-window, and a test holds each one's allowance (`secondsPerRequest`) to well inside it.
-Every sampler label says how many samples it must have (`expect N samples`, or
-`expect N of M refused`): fewer samples than that means the burst was cut short, and
-its result means nothing. If the report bursts run slow, the 6th report can arrive
-after the window and pass; read the latency as well as the errors.
+window as its JMeter window, and a test holds each burst's expected time (its
+`secondsPerRequest` allowance times its requests) to **45 s**, three quarters of the
+window. The tightest is the report: 6 reports in sequence at 7 s each is 42 s, so each
+report must take under 7.5 s. If reports take longer, the 6th can arrive after the
+window and pass: read the report latency as well as the errors. Every sampler label
+says how many samples it must have (`expect N samples`, or `expect N of M refused`):
+fewer samples than that means the burst was cut short, and its result means nothing.
 
 ## Finding the saturation point — the `short` profile
 
