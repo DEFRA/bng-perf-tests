@@ -1129,7 +1129,7 @@ function mixedWorkloadGroup(defaults) {
       MIX_DEFAULTS.validate,
       jsonSampler(CHILD, {
         name: 'mixed: revalidate an upload (POST /baseline/validate/{uploadId})',
-        path: '/baseline/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}',
+        path: '/baseline/validate/${__P(uploadId_normal,)}',
         method: 'POST',
         body: '{"projectId":"${preparedProjectId}"}',
         timeoutProp: 'validateResponseTimeoutMs',
@@ -1174,7 +1174,7 @@ const RATE_LIMIT_REQUESTS = {
   },
   baselineValidate: {
     method: 'POST',
-    path: '/baseline/validate/${__P(uploadId_normal,)}',
+    path: '/baseline/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}',
     body: '{}',
     timeoutProp: 'validateResponseTimeoutMs',
     timeoutDefault: TIMEOUT_DEFAULTS.validate
@@ -1206,8 +1206,8 @@ function rateLimitSampler(indent, route, name, children) {
 }
 
 /**
- * Under a limit, the only answer that fails the sample is a refusal or a
- * server error. A 503 is the validator being busy, which is its own load shed
+ * Under a limit, the only answers that fail the sample are a refusal, a
+ * server error, or no HTTP answer at all. A 503 is the validator being busy, which is its own load shed
  * and not a failure here; a 4xx is the route's own answer to the request.
  * `assume_success` lets the assertions decide, so a sampler's error rate
  * counts exactly the requests a limit refused wrongly.
@@ -1226,6 +1226,14 @@ function notRefused(indent) {
       field: 'Assertion.response_code',
       testType: ASSERT_NOT_MATCHES,
       values: ['50[0-24-9]|5[1-9][0-9]']
+    }),
+    // A timeout or a refused connection has no HTTP status — JMeter reports a
+    // "Non HTTP response code" — and would otherwise pass both checks above.
+    responseAssertion(indent, {
+      name: 'An HTTP answer (no timeout or connection failure)',
+      field: 'Assertion.response_code',
+      testType: ASSERT_MATCHES,
+      values: ['[0-9]{3}']
     })
   )
 }
@@ -1732,6 +1740,7 @@ function main() {
 main()
 
 export {
+  RATE_LIMIT_REQUESTS,
   renderLadders,
   renderLaddersSh,
   renderTemplatePlan,

@@ -255,16 +255,49 @@ describe('the rate-limit profile', () => {
     }
   })
 
+  const plan = () =>
+    readFileSync(join(ROOT, 'scenarios', 'bng-perf.jmx'), 'utf8')
+
+  /** The rate-limit thread groups only, up to the end of the generated block. */
+  const rateLimitPart = (jmx) =>
+    jmx.slice(jmx.indexOf('<!-- Rate-limit bursts'), jmx.indexOf('END GENERATED'))
+
   test('the validate bursts need no staged upload', () => {
-    const jmx = readFileSync(join(ROOT, 'scenarios', 'bng-perf.jmx'), 'utf8')
+    const bursts = rateLimitPart(plan())
+    assert.ok(bursts.length > 0, 'expected the rate-limit bursts in the plan')
     for (const route of ['baseline', 'post-intervention']) {
       assert.ok(
-        jmx.includes(
+        bursts.includes(
           `/${route}/validate/\${__P(rateLimitValidateUploadId,not-an-upload-id)}`
         ),
-        `the ${route} validate burst reads a staged upload`
+        `the ${route} validate burst does not send the cheap uploadId`
       )
     }
+    assert.ok(
+      !/uploadId_|piUploadId_/.test(bursts),
+      'a rate-limit burst reads a staged upload'
+    )
+  })
+
+  test('no other group sends the cheap uploadId', () => {
+    const jmx = plan()
+    const elsewhere = jmx.replace(rateLimitPart(jmx), '')
+    assert.ok(!elsewhere.includes('rateLimitValidateUploadId'))
+  })
+
+  test('every rate-limit sampler fails a sample with no HTTP answer', () => {
+    const bursts = rateLimitPart(plan())
+    const samplers = (bursts.match(/<HTTPSamplerProxy/g) ?? []).length
+    const httpAnswer = (
+      bursts.match(/testname="An HTTP answer \(no timeout or connection failure\)"/g) ??
+      []
+    ).length
+    const refusedChecks = (
+      bursts.match(/testname="Refused by the rate limit \(429\)"/g) ?? []
+    ).length
+    // Each sampler is either checked as refused (a 429 is an answer) or has
+    // the HTTP-answer check.
+    assert.equal(httpAnswer + refusedChecks, samplers)
   })
 
   const stageFor = (env) => {

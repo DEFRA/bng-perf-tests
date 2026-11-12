@@ -11961,7 +11961,7 @@ that, every revalidate would 404 the edits behind it.</stringProp>
         </ThroughputController>
         <hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="mixed: revalidate an upload (POST /baseline/validate/{uploadId})">
-            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}</stringProp>
+            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_normal,)}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
             <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -12096,6 +12096,15 @@ the refusal moves to the limit times the number of copies.</stringProp>
               <intProp name="Assertion.test_type">5</intProp>
             </ResponseAssertion>
             <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="An HTTP answer (no timeout or connection failure)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="676297225">[0-9]{3}</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
+            </ResponseAssertion>
+            <hashTree/>
           </hashTree>
         </hashTree>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit upload start: each user over the limit (expect 2 samples all refused)">
@@ -12201,7 +12210,7 @@ the refusal moves to the limit times the number of copies.</stringProp>
         </LoopController>
         <hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit baseline validation: each user under the limit (expect 80 samples none refused)">
-            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_normal,)}</stringProp>
+            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
             <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -12237,10 +12246,19 @@ the refusal moves to the limit times the number of copies.</stringProp>
               <intProp name="Assertion.test_type">5</intProp>
             </ResponseAssertion>
             <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="An HTTP answer (no timeout or connection failure)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="676297225">[0-9]{3}</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
+            </ResponseAssertion>
+            <hashTree/>
           </hashTree>
         </hashTree>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit baseline validation: each user over the limit (expect 2 samples all refused)">
-          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_normal,)}</stringProp>
+          <stringProp name="HTTPSampler.path">/baseline/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -12378,6 +12396,15 @@ the refusal moves to the limit times the number of copies.</stringProp>
               <intProp name="Assertion.test_type">5</intProp>
             </ResponseAssertion>
             <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="An HTTP answer (no timeout or connection failure)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="676297225">[0-9]{3}</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
+            </ResponseAssertion>
+            <hashTree/>
           </hashTree>
         </hashTree>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit post-intervention validation: each user over the limit (expect 2 samples all refused)">
@@ -12512,6 +12539,15 @@ the refusal moves to the limit times the number of copies.</stringProp>
               <intProp name="Assertion.test_type">5</intProp>
             </ResponseAssertion>
             <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="An HTTP answer (no timeout or connection failure)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="676297225">[0-9]{3}</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
+            </ResponseAssertion>
+            <hashTree/>
           </hashTree>
         </hashTree>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit PDF report: each user over the limit (expect 2 samples all refused)">
@@ -12637,6 +12673,15 @@ the refusal moves to the limit times the number of copies.</stringProp>
               <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
               <boolProp name="Assertion.assume_success">false</boolProp>
               <intProp name="Assertion.test_type">5</intProp>
+            </ResponseAssertion>
+            <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="An HTTP answer (no timeout or connection failure)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="676297225">[0-9]{3}</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
@@ -12771,6 +12816,15 @@ the backend), and none of the rest. Read the count off the error column.</string
               <intProp name="Assertion.test_type">5</intProp>
             </ResponseAssertion>
             <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="An HTTP answer (no timeout or connection failure)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="676297225">[0-9]{3}</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
+            </ResponseAssertion>
+            <hashTree/>
           </hashTree>
         </hashTree>
       </hashTree>
@@ -12836,7 +12890,7 @@ the backend), and none of the rest. Read the count off the error column.</string
         </LoopController>
         <hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit baseline validation: all users (expect 15 of 135 refused)">
-            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_normal,)}</stringProp>
+            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
             <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -12870,6 +12924,15 @@ the backend), and none of the rest. Read the count off the error column.</string
               <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
               <boolProp name="Assertion.assume_success">false</boolProp>
               <intProp name="Assertion.test_type">5</intProp>
+            </ResponseAssertion>
+            <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="An HTTP answer (no timeout or connection failure)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="676297225">[0-9]{3}</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
@@ -12973,6 +13036,15 @@ the backend), and none of the rest. Read the count off the error column.</string
               <intProp name="Assertion.test_type">5</intProp>
             </ResponseAssertion>
             <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="An HTTP answer (no timeout or connection failure)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="676297225">[0-9]{3}</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
+            </ResponseAssertion>
+            <hashTree/>
           </hashTree>
         </hashTree>
       </hashTree>
@@ -13067,6 +13139,15 @@ the backend), and none of the rest. Read the count off the error column.</string
               <intProp name="Assertion.test_type">5</intProp>
             </ResponseAssertion>
             <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="An HTTP answer (no timeout or connection failure)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="676297225">[0-9]{3}</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
+            </ResponseAssertion>
+            <hashTree/>
           </hashTree>
         </hashTree>
       </hashTree>
@@ -13159,6 +13240,15 @@ the backend), and none of the rest. Read the count off the error column.</string
               <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
               <boolProp name="Assertion.assume_success">false</boolProp>
               <intProp name="Assertion.test_type">5</intProp>
+            </ResponseAssertion>
+            <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="An HTTP answer (no timeout or connection failure)">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="676297225">[0-9]{3}</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">1</intProp>
             </ResponseAssertion>
             <hashTree/>
           </hashTree>
