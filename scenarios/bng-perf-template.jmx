@@ -12063,7 +12063,7 @@ that, every revalidate would 404 the edits behind it.</stringProp>
         </ThroughputController>
         <hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="mixed: revalidate an upload (POST /baseline/validate/{uploadId})">
-            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_normal,)}</stringProp>
+            <stringProp name="HTTPSampler.path">/baseline/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
             <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -12161,7 +12161,7 @@ the refusal moves to the limit times the number of copies.</stringProp>
           <stringProp name="LoopController.loops">10</stringProp>
         </LoopController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit upload start: each user under the limit">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit upload start: each user under the limit (expect 20 samples none refused)">
             <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -12200,7 +12200,7 @@ the refusal moves to the limit times the number of copies.</stringProp>
             <hashTree/>
           </hashTree>
         </hashTree>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit upload start: each user over the limit">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit upload start: each user over the limit (expect 2 samples all refused)">
           <stringProp name="HTTPSampler.path">/upload/initiate</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -12302,7 +12302,7 @@ the refusal moves to the limit times the number of copies.</stringProp>
           <stringProp name="LoopController.loops">40</stringProp>
         </LoopController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit baseline validation: each user under the limit">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit baseline validation: each user under the limit (expect 80 samples none refused)">
             <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_normal,)}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -12341,7 +12341,7 @@ the refusal moves to the limit times the number of copies.</stringProp>
             <hashTree/>
           </hashTree>
         </hashTree>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit baseline validation: each user over the limit">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit baseline validation: each user over the limit (expect 2 samples all refused)">
           <stringProp name="HTTPSampler.path">/baseline/validate/${__P(uploadId_normal,)}</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -12443,8 +12443,8 @@ the refusal moves to the limit times the number of copies.</stringProp>
           <stringProp name="LoopController.loops">40</stringProp>
         </LoopController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit post-intervention validation: each user under the limit">
-            <stringProp name="HTTPSampler.path">/post-intervention/validate/${__P(piUploadId_normal,)}</stringProp>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit post-intervention validation: each user under the limit (expect 80 samples none refused)">
+            <stringProp name="HTTPSampler.path">/post-intervention/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
             <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -12482,8 +12482,8 @@ the refusal moves to the limit times the number of copies.</stringProp>
             <hashTree/>
           </hashTree>
         </hashTree>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit post-intervention validation: each user over the limit">
-          <stringProp name="HTTPSampler.path">/post-intervention/validate/${__P(piUploadId_normal,)}</stringProp>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit post-intervention validation: each user over the limit (expect 2 samples all refused)">
+          <stringProp name="HTTPSampler.path">/post-intervention/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}</stringProp>
           <stringProp name="HTTPSampler.method">POST</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
@@ -12584,7 +12584,7 @@ the refusal moves to the limit times the number of copies.</stringProp>
           <stringProp name="LoopController.loops">5</stringProp>
         </LoopController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit PDF report: each user under the limit">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit PDF report: each user under the limit (expect 10 samples none refused)">
             <stringProp name="HTTPSampler.path">/projects/${rateLimitProjectId}/report.pdf</stringProp>
             <stringProp name="HTTPSampler.method">GET</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -12616,7 +12616,7 @@ the refusal moves to the limit times the number of copies.</stringProp>
             <hashTree/>
           </hashTree>
         </hashTree>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit PDF report: each user over the limit">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit PDF report: each user over the limit (expect 2 samples all refused)">
           <stringProp name="HTTPSampler.path">/projects/${rateLimitProjectId}/report.pdf</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -12711,7 +12711,7 @@ the refusal moves to the limit times the number of copies.</stringProp>
           <stringProp name="LoopController.loops">600</stringProp>
         </LoopController>
         <hashTree>
-          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit OS map tiles: each user under the limit">
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit OS map tiles: each user under the limit (expect 1200 samples none refused)">
             <stringProp name="HTTPSampler.path">${__P(rateLimitTilePath,/os-tiles/capabilities)}</stringProp>
             <stringProp name="HTTPSampler.method">GET</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -12743,7 +12743,7 @@ the refusal moves to the limit times the number of copies.</stringProp>
             <hashTree/>
           </hashTree>
         </hashTree>
-        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit OS map tiles: each user over the limit">
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit OS map tiles: each user over the limit (expect 2 samples all refused)">
           <stringProp name="HTTPSampler.path">${__P(rateLimitTilePath,/os-tiles/capabilities)}</stringProp>
           <stringProp name="HTTPSampler.method">GET</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
@@ -13039,7 +13039,7 @@ the backend), and none of the rest. Read the count off the error column.</string
         </LoopController>
         <hashTree>
           <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="rate limit post-intervention validation: all users (expect 15 of 135 refused)">
-            <stringProp name="HTTPSampler.path">/post-intervention/validate/${__P(piUploadId_normal,)}</stringProp>
+            <stringProp name="HTTPSampler.path">/post-intervention/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}</stringProp>
             <stringProp name="HTTPSampler.method">POST</stringProp>
             <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
             <boolProp name="HTTPSampler.use_keepalive">true</boolProp>

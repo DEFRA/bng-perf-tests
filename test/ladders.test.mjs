@@ -31,6 +31,7 @@ import {
   phasesBeyondCutoff,
   phasesWithinCutoff,
   profilePhases,
+  rateLimitBurstSeconds,
   rateLimitKey,
   rateLimitPhases,
   rateLimitUserCount,
@@ -232,6 +233,69 @@ describe('the rate-limit profile', () => {
         `${route.key}: the all-users burst starts inside the user burst's window`
       )
     }
+  })
+
+  test('every burst finishes well inside the rate-limit window', () => {
+    // A burst that ran past the window would see its count reset, and pass a
+    // request that should have been refused. Half the window leaves room for a
+    // slow day.
+    for (const route of RATE_LIMITED_ROUTES) {
+      for (const kind of ['user', 'allUsers']) {
+        assert.ok(
+          rateLimitBurstSeconds(route, kind) < RATE_LIMIT_WINDOW_SECONDS,
+          `${route.key} ${kind}: the burst does not fit in the window`
+        )
+      }
+    }
+  })
+
+  test('every burst has the whole rate-limit window, so the guard never cuts one short', () => {
+    for (const phase of rateLimitPhases()) {
+      assert.equal(phase.window, RATE_LIMIT_WINDOW_SECONDS, phase.key)
+    }
+  })
+
+  test('the validate bursts need no staged upload', () => {
+    const jmx = readFileSync(join(ROOT, 'scenarios', 'bng-perf.jmx'), 'utf8')
+    for (const route of ['baseline', 'post-intervention']) {
+      assert.ok(
+        jmx.includes(
+          `/${route}/validate/\${__P(rateLimitValidateUploadId,not-an-upload-id)}`
+        ),
+        `the ${route} validate burst reads a staged upload`
+      )
+    }
+  })
+
+  const stageFor = (env) => {
+    const dumped = execFileSync('sh', [join(ROOT, 'entrypoint.sh')], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        JM_HOME: ROOT,
+        ENVIRONMENT: 'local',
+        TEST_SCENARIO: '',
+        PERF_PROFILE: '',
+        STAGE_UPLOADS: '',
+        PERF_DUMP_SCHEDULE: 'true',
+        ...env
+      },
+      stdio: ['ignore', 'pipe', 'ignore']
+    })
+    return /^TOTAL STAGE (\w+)$/m.exec(dumped)?.[1]
+  }
+
+  test('stages nothing by default, because its bursts need nothing staged', () => {
+    assert.equal(stageFor({ PROFILE: 'ratelimit' }), 'false')
+    assert.equal(stageFor({ PROFILE: 'standard' }), 'true')
+  })
+
+  test('still stages when the caller asks it to', () => {
+    assert.equal(
+      stageFor({ PROFILE: 'ratelimit', STAGE_UPLOADS: 'true' }),
+      'true'
+    )
   })
 
   test('mints a different user for every thread of its widest phase', () => {

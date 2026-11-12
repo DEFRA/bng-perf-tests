@@ -1346,17 +1346,26 @@ not slide: an earlier count must have expired. Setting `PHASE_GAP_SECONDS` repla
 that gap and can break this.
 
 Under a limit, a 503 (the validator is busy) and a route's own 4xx do not fail a
-sample; a 429 or another 5xx does. The validate bursts use the staged `normal`
-uploads, with no project. The tile bursts use `/os-tiles/capabilities` (set
-`-JrateLimitTilePath=/os-tiles/{z}/{col}/{row}.png` for a tile); the routes exist only
-where the backend has an OS key, so elsewhere they answer 404.
+sample; a 429 or another 5xx does.
+
+- The validate bursts send an uploadId that is not one. The backend counts a request
+  toward its limits before it validates it, so each one counts, and the route answers
+  400 in milliseconds. 41 real validations in sequence take longer than the one-minute
+  window they must fit in; validation cost is what `standard` measures.
+  `-JrateLimitValidateUploadId=<uuid>` sends a real upload instead.
+- The tile bursts use `/os-tiles/capabilities` (set
+  `-JrateLimitTilePath=/os-tiles/{z}/{col}/{row}.png` for a tile). The routes exist
+  only where the backend has an OS key, so elsewhere they answer 404.
+- The profile stages nothing by default, because no burst needs a staged upload.
+  `STAGE_UPLOADS=true` stages as the other profiles do.
 
 **What can go wrong.** A user's burst is sent in sequence, so its last request must
-arrive inside the window its first one opened. If 41 validations take over a minute,
-the 41st is not refused and that sample fails: read the latency, not just the error.
-The plugin also counts refused requests, and counts a user's requests toward the
-all-users limit even when that user is over their own, so one user who keeps sending
-uses up the all-users limit for everybody until the window ends.
+arrive inside the window its first one opened. Every burst gets the whole one-minute
+window, and a test holds each one's allowance (`secondsPerRequest`) to well inside it.
+Every sampler label says how many samples it must have (`expect N samples`, or
+`expect N of M refused`): fewer samples than that means the burst was cut short, and
+its result means nothing. If the report bursts run slow, the 6th report can arrive
+after the window and pass; read the latency as well as the errors.
 
 ## Finding the saturation point — the `short` profile
 

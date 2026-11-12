@@ -453,9 +453,17 @@ export const PROFILES = {
  * changes there (open point 2 of BMD-1203), change it here and run
  * `npm run gen-scenario`.
  *
- * `secondsPerRequest` is an ALLOWANCE that sizes a phase's window, with the
- * same status as `secondsPerIteration` on the ladders. A window is a safety
- * net here: each thread sends a fixed number of requests and stops.
+ * `secondsPerRequest` is an ALLOWANCE for one request, as the bursts send it.
+ * It does not size a window — every burst gets the whole rate-limit window —
+ * but a test holds each burst to finishing well inside that window, because a
+ * burst that ran past it would see its count reset and pass a request that
+ * should have been refused.
+ *
+ * The validate bursts are cheap on purpose: their uploadId is not one (see
+ * gen-scenario.mjs RATE_LIMIT_REQUESTS). The backend checks the limits before
+ * it validates the request, so each one counts, and the route answers 400 in
+ * milliseconds. A real validation takes seconds, and 41 of them in sequence
+ * could not fit in a minute; validation cost is what `standard` measures.
  */
 export const RATE_LIMITED_ROUTES = [
   {
@@ -470,21 +478,21 @@ export const RATE_LIMITED_ROUTES = [
     title: 'baseline validation',
     userLimit: 40,
     allUsersLimit: 120,
-    secondsPerRequest: 1.5
+    secondsPerRequest: 0.2
   },
   {
     key: 'piValidate',
     title: 'post-intervention validation',
     userLimit: 40,
     allUsersLimit: 120,
-    secondsPerRequest: 1.5
+    secondsPerRequest: 0.2
   },
   {
     key: 'report',
     title: 'PDF report',
     userLimit: 5,
     allUsersLimit: 20,
-    secondsPerRequest: 5
+    secondsPerRequest: 8
   },
   {
     key: 'osTiles',
@@ -513,10 +521,26 @@ export const RATE_LIMIT_ALL_USERS_THREADS = 8
 const RATE_LIMIT_SLACK_SECONDS = 5
 
 /**
- * Concurrent requests slow each other down, so an all-users window allows
- * each request this many times its allowance.
+ * Concurrent requests slow each other down, so an all-users burst is allowed
+ * this many times its allowance for each request.
  */
-const RATE_LIMIT_CONTENTION_FACTOR = 2
+export const RATE_LIMIT_CONTENTION_FACTOR = 2
+
+/**
+ * Seconds a burst is expected to take: the requests one thread sends, in
+ * sequence, at their allowance. It must stay well inside the rate-limit
+ * window (a test holds it to that).
+ */
+export function rateLimitBurstSeconds(route, kind) {
+  if (kind === 'user') {
+    return (route.userLimit + 1) * route.secondsPerRequest
+  }
+  return (
+    allUsersBurst(route).requestsPerThread *
+    route.secondsPerRequest *
+    RATE_LIMIT_CONTENTION_FACTOR
+  )
+}
 
 /**
  * How the all-users phase of a route is shaped: threads, the requests each
@@ -553,29 +577,22 @@ export function rateLimitKey(route, kind) {
  * or that phase would be refused early.
  */
 export function rateLimitPhases() {
+  // Every burst gets the whole rate-limit window as its JMeter window. A
+  // thread stops after its fixed requests, so the window is only a guard, and
+  // a burst that needs longer than the limit's window measures nothing.
   const userPhases = RATE_LIMITED_ROUTES.map((route) => ({
     key: rateLimitKey(route, 'user'),
     users: RATE_LIMIT_USER_PHASE_THREADS,
-    window:
-      Math.ceil((route.userLimit + 1) * route.secondsPerRequest) +
-      RATE_LIMIT_SLACK_SECONDS,
+    window: RATE_LIMIT_WINDOW_SECONDS,
     gap: PHASE_GAP_BOUNDS.maxSeconds
   }))
   userPhases.at(-1).gap = RATE_LIMIT_WINDOW_SECONDS + RATE_LIMIT_SLACK_SECONDS
-  const allUsersPhases = RATE_LIMITED_ROUTES.map((route) => {
-    const burst = allUsersBurst(route)
-    return {
-      key: rateLimitKey(route, 'allUsers'),
-      users: burst.threads,
-      window:
-        Math.ceil(
-          burst.requestsPerThread *
-            route.secondsPerRequest *
-            RATE_LIMIT_CONTENTION_FACTOR
-        ) + RATE_LIMIT_SLACK_SECONDS,
-      gap: PHASE_GAP_BOUNDS.maxSeconds
-    }
-  })
+  const allUsersPhases = RATE_LIMITED_ROUTES.map((route) => ({
+    key: rateLimitKey(route, 'allUsers'),
+    users: allUsersBurst(route).threads,
+    window: RATE_LIMIT_WINDOW_SECONDS,
+    gap: PHASE_GAP_BOUNDS.maxSeconds
+  }))
   return [...userPhases, ...allUsersPhases]
 }
 

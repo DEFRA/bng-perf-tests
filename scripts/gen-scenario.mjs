@@ -47,6 +47,7 @@ import {
   MIX_DEFAULTS,
   PROFILES,
   RATE_LIMITED_ROUTES,
+  RATE_LIMIT_USER_PHASE_THREADS,
   SETUP_ALLOWANCE_SECONDS,
   SIZE_LABELS,
   allUsersBurst,
@@ -1128,7 +1129,7 @@ function mixedWorkloadGroup(defaults) {
       MIX_DEFAULTS.validate,
       jsonSampler(CHILD, {
         name: 'mixed: revalidate an upload (POST /baseline/validate/{uploadId})',
-        path: '/baseline/validate/${__P(uploadId_normal,)}',
+        path: '/baseline/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}',
         method: 'POST',
         body: '{"projectId":"${preparedProjectId}"}',
         timeoutProp: 'validateResponseTimeoutMs',
@@ -1148,9 +1149,17 @@ ${BODY}<hashTree/>`,
 // ── Rate-limit bursts ───────────────────────────────────────────────────────
 
 /**
- * The request each rate-limited route is burst with. The ids come from the
- * thread's own row of the user pool (its project) or from staging (the
- * uploads), so a request that is not refused does the route's real work.
+ * The request each rate-limited route is burst with.
+ *
+ * The upload start and the report do the route's real work: the report reads
+ * the thread's own project, from its row of the user pool.
+ *
+ * The validate bursts send an uploadId that is not one. The backend counts a
+ * request toward its limits before it validates the request, so each one
+ * counts, and the route answers 400 in milliseconds rather than validating a
+ * file for seconds: 41 real validations in sequence would not fit inside the
+ * one-minute window they have to. `-JrateLimitValidateUploadId=<uuid>` sends
+ * a real staged upload instead, where validation is fast enough for that.
  *
  * The tile route defaults to the capabilities document: it is rate-limited
  * like the tiles, needs no grid coordinate and spends no OS quota.
@@ -1172,7 +1181,7 @@ const RATE_LIMIT_REQUESTS = {
   },
   piValidate: {
     method: 'POST',
-    path: '/post-intervention/validate/${__P(piUploadId_normal,)}',
+    path: '/post-intervention/validate/${__P(rateLimitValidateUploadId,not-an-upload-id)}',
     body: '{}',
     timeoutProp: 'validateResponseTimeoutMs',
     timeoutDefault: TIMEOUT_DEFAULTS.validate
@@ -1277,11 +1286,13 @@ function rateLimitSetup() {
  * pass, then one more, which must be refused with a Retry-After.
  *
  * The threads send in sequence, so the last request must arrive inside the
- * window the first one opened. A route slower than the window divided by the
- * limit cannot show its refusal this way; the README says what to do then.
+ * window the first one opened; a test holds every burst to that. Each label
+ * states how many samples it must have, so a burst the JMeter window cut
+ * short shows as missing samples rather than as a pass.
  */
 function rateLimitUserStep(route, defaults) {
   const key = rateLimitKey(route, 'user')
+  const threads = RATE_LIMIT_USER_PHASE_THREADS
   return lines(
     threadGroup({
       name: `Rate limit ${route.title}: each user over the limit`,
@@ -1303,14 +1314,14 @@ function rateLimitUserStep(route, defaults) {
       child: rateLimitSampler(
         CHILD,
         route,
-        `rate limit ${route.title}: each user under the limit`,
+        `rate limit ${route.title}: each user under the limit (expect ${threads * route.userLimit} samples none refused)`,
         notRefused(CHILD + '  ')
       )
     }),
     rateLimitSampler(
       BODY,
       route,
-      `rate limit ${route.title}: each user over the limit`,
+      `rate limit ${route.title}: each user over the limit (expect ${threads} samples all refused)`,
       refused(CHILD)
     ),
     `${IND}</hashTree>`

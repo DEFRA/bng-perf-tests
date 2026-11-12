@@ -117,6 +117,9 @@ GROWTH_KIB=$(( CREATE_PARCELS_TOTAL * PARCEL_BYTES * AUDIT_COPIES / BYTES_PER_KI
 # Staging is per-size and not all-or-nothing: a size that fails to stage costs
 # its own phase, not the run. Only a total failure — or a failure to build the
 # project pool, which every phase reads its projectId from — gates the task.
+# Set by the caller, or defaulted here? The rate-limit profile stages nothing
+# by default (below), but an explicit value is honoured.
+STAGE_UPLOADS_GIVEN=${STAGE_UPLOADS:+1}
 STAGE_UPLOADS=${STAGE_UPLOADS:-true}
 # The backend hands back only the uploader PATH, so the uploader's own host has
 # to be resolved here. Mirrors the backend's own derivation from ENVIRONMENT.
@@ -366,6 +369,12 @@ eval "PROFILE_PREAMBLE=\${PROFILE_PREAMBLE_${PERF_PROFILE}:-1}"
 eval "PROFILE_RATE_LIMIT=\${PROFILE_RATE_LIMIT_${PERF_PROFILE}:-0}"
 if [ "${PROFILE_RATE_LIMIT}" = "1" ]; then
   echo "▸ profile '${PERF_PROFILE}': rate-limit bursts — the backend must run with RATE_LIMIT_ENABLED=true, as ONE copy"
+  # The bursts need their own user pool and nothing staging makes, and staging
+  # uploads and scans all four fixtures and builds the project pools. Skip it
+  # unless the caller asked for it.
+  if [ -z "${STAGE_UPLOADS_GIVEN}" ]; then
+    STAGE_UPLOADS=false
+  fi
 fi
 if [ "${PROFILE_PREAMBLE}" = "0" ]; then
   echo "▸ profile '${PERF_PROFILE}': preamble off (no home/list/create/probe groups, no size ramp)"
@@ -780,6 +789,7 @@ if [ "${PERF_DUMP_SCHEDULE}" = "true" ]; then
   echo "TOTAL PROBE ${PROBE_DELAY_SECONDS} ${PROBE_DURATION_SECONDS}"
   echo "TOTAL PREPARED ${PREPARED_SIZES:-none}"
   echo "TOTAL PI ${PI_SIZES:-none}"
+  echo "TOTAL STAGE ${STAGE_UPLOADS}"
   exit 0
 fi
 
@@ -982,8 +992,16 @@ disable_unstaged_phases() {
   if [ "${STAGE_UPLOADS}" != "true" ]; then
     echo "▸ STAGE_UPLOADS is not true — skipping every upload, edit and fetch phase" >&2
     for phase_key in ${ALL_PHASE_KEYS}; do
-      eval "PHASE_USERS_${phase_key}=0"
+      case "${phase_key}" in
+        # The rate-limit bursts read their own user pool, not staging; that
+        # pool is checked below.
+        rateLimit_*) ;;
+        *) eval "PHASE_USERS_${phase_key}=0" ;;
+      esac
     done
+    if ! staged_prop rateLimitUsersCsv; then
+      disable_phases_matching "rateLimit_"
+    fi
     for upload_label in ${LADDER_SIZES}; do
       eval "FETCH_LOOPS_${upload_label}=0"
     done
@@ -1041,18 +1059,10 @@ disable_unstaged_phases() {
     disable_phases_matching "editContention_"
   fi
 
-  # The rate-limit bursts need their user pool, and the validate bursts the
-  # normal uploads staging made.
+  # The rate-limit bursts need only their user pool: the validate bursts send
+  # no staged upload (gen-scenario.mjs RATE_LIMIT_REQUESTS).
   if ! staged_prop rateLimitUsersCsv; then
     disable_phases_matching "rateLimit_"
-  fi
-  if ! staged_upload normal; then
-    echo "▸ no staged normal upload — skipping the baseline validation rate-limit bursts" >&2
-    disable_phases_matching "rateLimit_baselineValidate_"
-  fi
-  if ! staged_prop piUploadId_normal; then
-    echo "▸ no staged normal post-intervention upload — skipping its rate-limit bursts" >&2
-    disable_phases_matching "rateLimit_piValidate_"
   fi
 
   # The mixed workload reads the prepared pool and revalidates the normal
