@@ -1155,11 +1155,13 @@ ${BODY}<hashTree/>`,
  * the thread's own project, from its row of the user pool.
  *
  * The validate bursts send an uploadId that is not one. The backend counts a
- * request toward its limits before it validates the request, so each one
- * counts, and the route answers 400 in milliseconds rather than validating a
- * file for seconds: 41 real validations in sequence would not fit inside the
- * one-minute window they have to. `-JrateLimitValidateUploadId=<uuid>` sends
- * a real staged upload instead, where validation is fast enough for that.
+ * request toward its limits before it validates the request: hapi-rate-limit
+ * counts at `onPostAuth`, and hapi validates the route's params (a UUID) after
+ * that hook. So each one counts, and the route answers 400 in milliseconds
+ * rather than validating a file for seconds: 41 real validations in sequence
+ * would not fit inside the one-minute window they have to.
+ * `-JrateLimitValidateUploadId=<uuid>` sends a real staged upload instead,
+ * where validation is fast enough for that.
  *
  * The tile route defaults to the capabilities document: it is rate-limited
  * like the tiles, needs no grid coordinate and spends no OS quota.
